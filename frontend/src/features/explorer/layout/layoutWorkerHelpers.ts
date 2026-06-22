@@ -1,5 +1,5 @@
-// Shared helpers for layout workers — mirrors functions from layout.ts
-// kept separate so the worker module can import them without dragging in React types
+// Shared node-sizing and edge-styling helpers for the ELK layout adapter.
+// Kept separate from useLayoutWorker so they can be reused without React types.
 
 export function nodeWidth(kind: string): number {
   switch (kind) {

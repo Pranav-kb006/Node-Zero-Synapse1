@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -93,6 +93,13 @@ class ExplorerEdge(BaseModel):
     relation: Relation
     weight: float = 1.0
     members: Optional[List[str]] = None
+    # Aggregate-edge metadata. When `aggregated` is true the edge represents
+    # many underlying entity-level edges projected onto a visible ancestor
+    # container (`level` = "file" or "directory"). `relation_counts` carries
+    # the per-relation breakdown so the UI can label and filter aggregates.
+    aggregated: bool = False
+    level: Optional[str] = None
+    relation_counts: Optional[Dict[str, int]] = None
 
 
 class ExplorerGroup(BaseModel):
@@ -214,9 +221,12 @@ def _make_node_id(raw_id: str) -> str:
 
 def _infer_parent_id(node_id: str, node: Dict[str, Any]) -> Optional[str]:
     file_path = node.get("file", "")
-    if node.get("type") in ("function", "method", "variable", "class", "import"):
+    if node.get("type") in ("function", "method", "variable", "class",
+                            "interface", "enum", "struct", "module", "import"):
         if file_path:
-            return file_path
+            # Point at the synthesized file node id so the parent chain is
+            # consistent: entity -> file:<path> -> dir:<path>.
+            return f"file:{file_path}"
     return None
 
 
@@ -423,6 +433,81 @@ def build_explorer_response(
             weight=1.0,
         ))
 
+    # --- Aggregate entity-level dependency edges onto file & directory
+    #     containers so collapsed views still convey dependency structure.
+    #     This mirrors /graph/condensed's pre-aggregation (plan section 3.3)
+    #     and lets the frontend show weighted container edges without
+    #     recomputing every aggregate in React. ---
+    entity_file_path: Dict[str, str] = {}
+    for node in explorer_nodes:
+        if node.kind not in (NodeKind.DIRECTORY, NodeKind.FILE) and node.file_path:
+            entity_file_path[node.id] = node.file_path
+
+    def _dir_of(fp: str) -> str:
+        return "/".join(fp.rstrip("/").split("/")[:-1]) or fp
+
+    # (level, src_container, tgt_container, relation) -> count
+    file_agg: Dict[Tuple[str, str, str], int] = {}
+    dir_agg: Dict[Tuple[str, str, str], int] = {}
+    for edge in explorer_edges:
+        if edge.relation == Relation.CONTAINS:
+            continue
+        src_fp = entity_file_path.get(edge.source)
+        tgt_fp = entity_file_path.get(edge.target)
+        if not src_fp or not tgt_fp:
+            continue
+        rel = edge.relation.value
+        if src_fp != tgt_fp:
+            key = (f"file:{src_fp}", f"file:{tgt_fp}", rel)
+            file_agg[key] = file_agg.get(key, 0) + 1
+        src_dir, tgt_dir = _dir_of(src_fp), _dir_of(tgt_fp)
+        if src_dir != tgt_dir:
+            key = (f"dir:{src_dir}", f"dir:{tgt_dir}", rel)
+            dir_agg[key] = dir_agg.get(key, 0) + 1
+
+    def _emit_aggregates(agg: Dict[Tuple[str, str, str], int], level: str) -> None:
+        # Combine per-relation counts into one weighted edge per container pair.
+        pair_counts: Dict[Tuple[str, str], Dict[str, int]] = {}
+        for (src, tgt, rel), count in agg.items():
+            pair_counts.setdefault((src, tgt), {})[rel] = count
+        for (src, tgt), rel_counts in pair_counts.items():
+            total = sum(rel_counts.values())
+            dominant = max(rel_counts.items(), key=lambda kv: kv[1])[0]
+            edge_id = f"agg:{level}:{src}--{tgt}"
+            if edge_id in seen_edges:
+                continue
+            seen_edges.add(edge_id)
+            explorer_edges.append(ExplorerEdge(
+                id=edge_id,
+                source=src,
+                target=tgt,
+                relation=_EDGE_RELATION_MAP.get(dominant.upper(), Relation.CALLS),
+                weight=float(total),
+                aggregated=True,
+                level=level,
+                relation_counts=rel_counts,
+                members=[f"{rel}:{cnt}" for rel, cnt in sorted(rel_counts.items())],
+            ))
+
+    _emit_aggregates(file_agg, "file")
+    _emit_aggregates(dir_agg, "directory")
+
+    # --- Build directory groups (one per directory, child file ids) ---
+    explorer_groups: List[ExplorerGroup] = []
+    files_by_dir: Dict[str, List[str]] = {}
+    for fp in files_by_path:
+        files_by_dir.setdefault(_dir_of(fp), []).append(f"file:{fp}")
+    for dp, info in dirs_by_path.items():
+        dlangs = info["langs"]
+        explorer_groups.append(ExplorerGroup(
+            id=f"dir:{dp}",
+            label=dp.split("/")[-1] or dp,
+            kind="directory",
+            child_ids=sorted(files_by_dir.get(dp, [])),
+            language=Language(list(dlangs)[0]) if len(dlangs) == 1 else None,
+            metadata={"file_count": info["file_count"], "complexity_sum": info["complexity_sum"]},
+        ))
+
     # --- Determine repo name ---
     repo_name = "repository"
     if raw_data:
@@ -454,7 +539,7 @@ def build_explorer_response(
         ),
         nodes=explorer_nodes,
         edges=explorer_edges,
-        groups=[],
+        groups=explorer_groups,
         capabilities=ExplorerCapabilities(
             languages=[Language(l) for l in sorted(detected_languages)],
             has_git=True,

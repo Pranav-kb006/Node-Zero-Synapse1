@@ -31,7 +31,20 @@ import { PersonaPresets, getPersonaConfig, type Persona } from './personas/Perso
 import { DomainClusters } from './clusters/DomainClusters';
 import { initialOverlayState, type OverlayState } from './state/overlays';
 import { useExplorerUrlState } from './state/urlState';
+import { projectEdges } from './graph/projection';
 import type { ExplorerFilters, ExplorerNode, ExplorerEdge } from './types';
+
+// Repos with at most this many files start fully expanded; larger repos start
+// collapsed to directory containers so the coarse view stays legible.
+const AUTO_EXPAND_FILE_LIMIT = 25;
+
+// Directory portion of a repo-relative path. Mirrors the backend's
+// "/".join(fp.split("/")[:-1]) or fp so the synthesized dir id matches.
+function dirOfPath(fp: string): string {
+  const parts = fp.replace(/\/+$/, '').split('/');
+  parts.pop();
+  return parts.join('/') || fp;
+}
 import { LoadingState, ErrorState, EmptyState } from '@/components/ui/StatusStates';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Map as MapIcon } from 'lucide-react';
@@ -92,9 +105,15 @@ function ExplorerCanvas() {
   }));
   const [selectedNode, setSelectedNode] = useState<ExplorerNode | null>(null);
   const [highlightedNodeId, setHighlightedNodeId] = useState<string | null>(urlState.highlightedNode);
+  const [search, setSearch] = useState('');
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(() => {
     return new Set(urlState.expanded ? urlState.expanded.split(',') : []);
   });
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(() => {
+    return new Set(urlState.expandedDirs ? urlState.expandedDirs.split(',') : []);
+  });
+  // Track whether we've applied the size-based default expansion yet.
+  const didInitExpansionRef = useRef(false);
   const [rfNodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [layoutPhase, setLayoutPhase] = useState<'idle' | 'coarse' | 'expanding'>('idle');
@@ -122,6 +141,9 @@ function ExplorerCanvas() {
   // ─── DOM ref for overlays ───────────────────────────
   const flowWrapperRef = useRef<HTMLDivElement>(null);
 
+  // Node id to center on once it has been laid out (search / reveal).
+  const focusNodeIdRef = useRef<string | null>(null);
+
   // ─── Layout worker & abort controller ───────────────
   const { computeLayout } = useLayoutWorker();
   const layoutAbortControllerRef = useRef<AbortController | null>(null);
@@ -133,6 +155,30 @@ function ExplorerCanvas() {
 
   const explorerNodeMap = useMemo(
     () => new Map((data?.nodes ?? []).map((n) => [n.id, n])),
+    [data],
+  );
+
+  // Child -> parent lookup for projecting edges onto visible ancestors.
+  // Derived from file_path (not backend parent_id) so the chain
+  // entity -> file:<path> -> dir:<path> always matches the synthesized
+  // container node ids regardless of the API's parent_id format.
+  const parentOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of data?.nodes ?? []) {
+      if (n.kind === 'directory') continue;
+      if (n.kind === 'file') {
+        m.set(n.id, `dir:${dirOfPath(n.file_path)}`);
+      } else if (n.file_path) {
+        m.set(n.id, `file:${n.file_path}`);
+      }
+    }
+    return m;
+  }, [data]);
+
+  // Entity-level dependency edges only (exclude backend aggregates & CONTAINS);
+  // the frontend re-projects these against the current visible container set.
+  const entityDepEdges = useMemo(
+    () => (data?.edges ?? []).filter((e) => !e.aggregated && e.relation !== 'contains'),
     [data],
   );
 
@@ -163,6 +209,27 @@ function ExplorerCanvas() {
   useEffect(() => {
     setSearchParam('expanded', expandedFiles.size > 0 ? Array.from(expandedFiles).join(',') : null);
   }, [expandedFiles, setSearchParam]);
+
+  useEffect(() => {
+    setSearchParam('expandedDirs', expandedDirs.size > 0 ? Array.from(expandedDirs).join(',') : null);
+  }, [expandedDirs, setSearchParam]);
+
+  // Size-based default: small repos start fully expanded (show every file),
+  // large repos start collapsed to directory containers. Runs once per load,
+  // and only when the URL didn't already pin an expansion state.
+  useEffect(() => {
+    if (!data || didInitExpansionRef.current) return;
+    didInitExpansionRef.current = true;
+    if (urlState.expandedDirs || urlState.expanded) return; // respect shared URL
+
+    const dirIds = data.nodes.filter((n) => n.kind === 'directory').map((n) => n.id);
+    const fileCount = data.nodes.filter((n) => n.kind === 'file').length;
+    if (fileCount <= AUTO_EXPAND_FILE_LIMIT) {
+      setExpandedDirs(new Set(dirIds));
+    } else {
+      setExpandedDirs(new Set());
+    }
+  }, [data, urlState.expandedDirs, urlState.expanded]);
 
   // Load selectedNode if URL specifies highlightedNode
   useEffect(() => {
@@ -226,7 +293,11 @@ function ExplorerCanvas() {
     }
   }, [data]);
 
-  // ─── Off-thread Layout calculation via Layout Worker ──
+  // ─── Off-thread Layout via progressive disclosure ─────
+  // Directories are always shown; files appear only inside expanded
+  // directories; entities appear only inside expanded files. Hidden
+  // dependency edges are projected onto the nearest visible container and
+  // aggregated, so a collapsed graph still conveys real structure.
   useEffect(() => {
     if (!data) return;
 
@@ -242,19 +313,27 @@ function ExplorerCanvas() {
 
     setLayoutPhase(expandedFiles.size > 0 ? 'expanding' : 'coarse');
 
-    let coarseNodes = data.nodes.filter(
-      (n) => (n.kind === 'directory' || n.kind === 'file') && !hiddenKinds.has(n.kind),
+    // Level 1: directory containers (always visible unless persona hides them).
+    const dirNodes = data.nodes.filter(
+      (n) => n.kind === 'directory' && !hiddenKinds.has(n.kind),
     );
 
-    if (activePersona === 'manager') {
-      coarseNodes = data.nodes.filter((n) => n.kind === 'directory' || n.kind === 'file');
-    }
+    // Level 2: files inside expanded directories (dir membership derived from
+    // the file path so it never depends on the API's parent_id format).
+    const fileNodes = data.nodes.filter(
+      (n) =>
+        n.kind === 'file' &&
+        !hiddenKinds.has(n.kind) &&
+        (dirNodes.length === 0 || expandedDirs.has(`dir:${dirOfPath(n.file_path)}`)),
+    );
 
-    const visibleNodes = [...coarseNodes];
+    const visibleNodes: ExplorerNode[] = [...dirNodes, ...fileNodes];
+    const visibleFileIds = new Set(fileNodes.map((n) => n.id));
 
-    // Compound layout child collection with Progressive Rendering Cap (Phase 5)
+    // Level 3: entities inside expanded files (whose directory is also open).
     const virtualEdges: ExplorerEdge[] = [];
     for (const fileId of expandedFiles) {
+      if (!visibleFileIds.has(fileId)) continue; // file not currently shown
       const fileNode = explorerNodeMap.get(fileId);
       if (!fileNode) continue;
 
@@ -295,9 +374,21 @@ function ExplorerCanvas() {
     }
 
     const visibleIds = new Set(visibleNodes.map((n) => n.id));
-    const finalEdges = data.edges
-      .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
-      .concat(virtualEdges);
+
+    // Project entity-level dependencies onto visible containers + aggregate.
+    const projected = projectEdges(entityDepEdges, visibleIds, parentOf);
+
+    // Keep file -> entity containment connectors so entities attach to their
+    // file. Directory -> file containment is shown by ELK compound nesting.
+    const containsEdges = data.edges.filter(
+      (e) =>
+        e.relation === 'contains' &&
+        e.source.startsWith('file:') &&
+        visibleIds.has(e.source) &&
+        visibleIds.has(e.target),
+    );
+
+    const finalEdges: ExplorerEdge[] = [...projected, ...containsEdges, ...virtualEdges];
 
     computeLayout(visibleNodes, finalEdges, {
       algorithm: 'layered',
@@ -327,7 +418,7 @@ function ExplorerCanvas() {
     return () => {
       controller.abort();
     };
-  }, [data, expandedFiles, activePersona, explorerNodeMap, setNodes, setEdges, computeLayout]);
+  }, [data, expandedFiles, expandedDirs, activePersona, explorerNodeMap, parentOf, entityDepEdges, setNodes, setEdges, computeLayout]);
 
   // ─── Interactions ──────────────────────────────────
   const onNodeClick = useCallback(
@@ -335,7 +426,27 @@ function ExplorerCanvas() {
       const en = explorerNodeMap.get(node.id);
       if (!en) return;
 
-      if (en.kind === 'file') {
+      if (en.kind === 'directory') {
+        // Toggle directory: reveal/hide its files. Collapsing a directory also
+        // collapses any of its files that were expanded.
+        setExpandedDirs((prev) => {
+          const next = new Set(prev);
+          if (next.has(node.id)) {
+            next.delete(node.id);
+            setExpandedFiles((files) => {
+              const nf = new Set(files);
+              for (const fid of nf) {
+                const f = explorerNodeMap.get(fid);
+                if (f && `dir:${dirOfPath(f.file_path)}` === node.id) nf.delete(fid);
+              }
+              return nf;
+            });
+          } else {
+            next.add(node.id);
+          }
+          return next;
+        });
+      } else if (en.kind === 'file') {
         setExpandedFiles((prev) => {
           const next = new Set(prev);
           if (next.has(node.id)) next.delete(node.id);
@@ -428,6 +539,58 @@ function ExplorerCanvas() {
     if (!highlightedNodeId || !data) return null;
     return buildConnectedComponent(highlightedNodeId, data.edges);
   }, [highlightedNodeId, data]);
+
+  // ─── Search: match symbols and reveal on selection ───
+  const searchResults = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!data || q.length < 2) return [];
+    return data.nodes
+      .filter((n) => n.kind !== 'directory' && n.kind !== 'file')
+      .filter(
+        (n) =>
+          n.name.toLowerCase().includes(q) ||
+          n.qualified_name.toLowerCase().includes(q),
+      )
+      .slice(0, 12);
+  }, [data, search]);
+
+  // Reveal a node: expand its directory + file, select, highlight, and queue
+  // a viewport centering once it is laid out.
+  const revealNode = useCallback(
+    (nodeId: string) => {
+      const en = explorerNodeMap.get(nodeId);
+      if (!en) return;
+      let dirId: string | null = null;
+      let fileId: string | null = null;
+      if (en.kind === 'directory') {
+        dirId = en.id;
+      } else if (en.kind === 'file') {
+        fileId = en.id;
+        dirId = `dir:${dirOfPath(en.file_path)}`;
+      } else if (en.file_path) {
+        fileId = `file:${en.file_path}`;
+        dirId = `dir:${dirOfPath(en.file_path)}`;
+      }
+      if (dirId) setExpandedDirs((prev) => (prev.has(dirId!) ? prev : new Set(prev).add(dirId!)));
+      if (fileId) setExpandedFiles((prev) => (prev.has(fileId!) ? prev : new Set(prev).add(fileId!)));
+      setSelectedNode(en);
+      setHighlightedNodeId(nodeId);
+      focusNodeIdRef.current = nodeId;
+    },
+    [explorerNodeMap],
+  );
+
+  // Center the viewport on a queued focus node once it appears in the layout.
+  useEffect(() => {
+    if (!focusNodeIdRef.current) return;
+    const rn = rfNodes.find((n) => n.id === focusNodeIdRef.current);
+    if (rn) {
+      const x = rn.position.x + ((rn.width as number) ?? 140) / 2;
+      const y = rn.position.y + ((rn.height as number) ?? 40) / 2;
+      setCenter(x, y, { zoom: 1.1, duration: 600 });
+      focusNodeIdRef.current = null;
+    }
+  }, [rfNodes, setCenter]);
 
   // ─── DOM-based highlight (bypasses ReactFlow state) ──
   useEffect(() => {
@@ -533,6 +696,10 @@ function ExplorerCanvas() {
         languages={data.capabilities.languages}
         nodeCount={rfNodes.length}
         edgeCount={rfEdges.length}
+        search={search}
+        onSearchChange={setSearch}
+        searchResults={searchResults}
+        onResultSelect={(id) => { revealNode(id); setSearch(''); }}
       />
 
       {/* Phase 4: Persona presets */}
@@ -590,15 +757,30 @@ function ExplorerCanvas() {
         )}
       </AnimatePresence>
 
-      {!expandedFiles.size && rfNodes.length > 0 && (
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-          <div className="px-3 py-1.5 rounded-full bg-synapse-panel/80 border border-white/[0.06] backdrop-blur-md">
+      {rfNodes.length > 0 && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-2">
+          <div className="px-3 py-1.5 rounded-full bg-synapse-panel/80 border border-white/[0.06] backdrop-blur-md pointer-events-none">
             <p className="text-[10px] text-white/30">
-              Click a file to expand its {entityCount.toLocaleString()} entities
+              {expandedDirs.size === 0
+                ? `Click a directory to reveal its files · aggregate edges show dependency counts`
+                : `Click a file to expand its entities`}
               <span className="mx-1.5 text-white/15">·</span>
-              {dirCount} dirs · {fileCount} files
+              {dirCount} dirs · {fileCount} files · {entityCount.toLocaleString()} entities
             </p>
           </div>
+          <button
+            onClick={() => {
+              if (expandedDirs.size > 0) {
+                setExpandedDirs(new Set());
+                setExpandedFiles(new Set());
+              } else {
+                setExpandedDirs(new Set(data.nodes.filter((n) => n.kind === 'directory').map((n) => n.id)));
+              }
+            }}
+            className="px-2.5 py-1.5 rounded-full text-[10px] font-medium text-white/50 hover:text-white/80 bg-synapse-panel/80 border border-white/[0.06] hover:border-white/15 backdrop-blur-md transition-all"
+          >
+            {expandedDirs.size > 0 ? 'Collapse all' : 'Expand all dirs'}
+          </button>
         </div>
       )}
 

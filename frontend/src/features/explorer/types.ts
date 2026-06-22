@@ -49,6 +49,12 @@ export interface ExplorerEdge {
   relation: Relation;
   weight: number;
   members?: string[];
+  /** True when this edge aggregates many entity-level edges onto a container. */
+  aggregated?: boolean;
+  /** Container level an aggregate edge sits at. */
+  level?: 'file' | 'directory';
+  /** Per-relation breakdown for aggregate edges. */
+  relation_counts?: Record<string, number>;
 }
 
 export interface ExplorerGroup {

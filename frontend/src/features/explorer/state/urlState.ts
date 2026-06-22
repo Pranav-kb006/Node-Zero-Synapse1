@@ -11,6 +11,7 @@ export interface ExplorerUrlState {
   tour: string | null;
   tourStep: number | null;
   expanded: string | null;
+  expandedDirs: string | null;
 }
 
 const PARAM_KEYS = {
@@ -23,6 +24,7 @@ const PARAM_KEYS = {
   tour: 'tour',
   tourStep: 'step',
   expanded: 'expanded',
+  expandedDirs: 'dirs',
 } as const;
 
 export function useExplorerUrlState() {
@@ -43,6 +45,7 @@ export function useExplorerUrlState() {
         ? Number(params.get(PARAM_KEYS.tourStep))
         : null,
       expanded: params.get(PARAM_KEYS.expanded),
+      expandedDirs: params.get(PARAM_KEYS.expandedDirs),
     }),
     [params],
   );
