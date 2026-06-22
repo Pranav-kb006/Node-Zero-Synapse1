@@ -38,6 +38,11 @@ import type { ExplorerFilters, ExplorerNode, ExplorerEdge } from './types';
 // collapsed to directory containers so the coarse view stays legible.
 const AUTO_EXPAND_FILE_LIMIT = 25;
 
+// Cap on rendered dependency edges. A dense repo can project hundreds of
+// container-to-container edges (node-qt: 362 between 47 dirs) which ELK turns
+// into an unreadable tangle. We render only the strongest-weighted ones.
+const MAX_DEPENDENCY_EDGES = 140;
+
 // Directory portion of a repo-relative path. Mirrors the backend's
 // "/".join(fp.split("/")[:-1]) or fp so the synthesized dir id matches.
 function dirOfPath(fp: string): string {
@@ -117,6 +122,7 @@ function ExplorerCanvas() {
   const [rfNodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [rfEdges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [layoutPhase, setLayoutPhase] = useState<'idle' | 'coarse' | 'expanding'>('idle');
+  const [edgeStats, setEdgeStats] = useState<{ shown: number; total: number }>({ shown: 0, total: 0 });
 
   // ─── Phase 3: Overlay state ──────────────────────────
   const [overlayData, setOverlayData] = useState<OverlayState>(() => {
@@ -375,8 +381,16 @@ function ExplorerCanvas() {
 
     const visibleIds = new Set(visibleNodes.map((n) => n.id));
 
-    // Project entity-level dependencies onto visible containers + aggregate.
-    const projected = projectEdges(entityDepEdges, visibleIds, parentOf);
+    // Project entity-level dependencies onto visible containers + aggregate,
+    // then keep only the strongest edges so dense graphs stay readable.
+    const projectedAll = projectEdges(entityDepEdges, visibleIds, parentOf);
+    let projected = projectedAll;
+    if (projectedAll.length > MAX_DEPENDENCY_EDGES) {
+      projected = [...projectedAll]
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, MAX_DEPENDENCY_EDGES);
+    }
+    setEdgeStats({ shown: projected.length, total: projectedAll.length });
 
     // Keep file -> entity containment connectors so entities attach to their
     // file. Directory -> file containment is shown by ELK compound nesting.
@@ -766,6 +780,11 @@ function ExplorerCanvas() {
                 : `Click a file to expand its entities`}
               <span className="mx-1.5 text-white/15">·</span>
               {dirCount} dirs · {fileCount} files · {entityCount.toLocaleString()} entities
+              {edgeStats.total > edgeStats.shown && (
+                <span className="ml-1.5 text-amber-400/60">
+                  · showing {edgeStats.shown} strongest of {edgeStats.total.toLocaleString()} dependencies
+                </span>
+              )}
             </p>
           </div>
           <button

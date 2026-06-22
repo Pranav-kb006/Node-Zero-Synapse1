@@ -598,9 +598,26 @@ def scan_repository(path: str) -> List[ParsedFile]:
 
     _supported = (".py", ".java", ".cpp", ".cc", ".cxx", ".h", ".hpp")
 
+    # Directories that are noise for code intelligence: VCS/caches, test trees,
+    # and — critically — vendored third-party source and build output. Without
+    # these, a repo that bundles a dependency (e.g. node-qt ships all of Qt
+    # under deps/) drowns the real project in tens of thousands of foreign
+    # entities and an unreadable graph.
+    _skip_dirs = {
+        ".venv", "venv", ".git", "__pycache__", "node_modules", "site-packages",
+        "chroma_db", "tests", "test",
+        # vendored third-party source
+        "deps", "vendor", "vendored", "third_party", "thirdparty", "3rdparty",
+        "external", "externals", "extern", "bower_components",
+        # build / generated output
+        "build", "dist", "out", "target", "bin", "obj", "cmake-build-debug",
+        # editor/tooling
+        ".idea", ".vscode", ".tox", ".mypy_cache", ".pytest_cache",
+    }
+
     for root, dirs, files in os.walk(path):
-        # Skip hidden and system directories
-        dirs[:] = [d for d in dirs if d not in [".venv", "venv", ".git", "__pycache__", "node_modules", "site-packages", "chroma_db", "tests"]]
+        # Skip hidden and system directories (in-place prune of os.walk).
+        dirs[:] = [d for d in dirs if d not in _skip_dirs]
 
         for file in files:
             if not file.endswith(_supported):

@@ -22,20 +22,23 @@ export function nodeHeight(kind: string): number {
 }
 
 export function edgeStyle(relation: string): React.CSSProperties {
+  // Lower stroke opacity keeps dense graphs readable — overlapping edges read
+  // as faint texture rather than a solid wall. Selection/hover highlight raises
+  // opacity back to full via the DOM highlight pass in ExplorerPage.
   switch (relation) {
     case 'contains':
-      return { stroke: '#475569', strokeWidth: 1.5, strokeLinecap: 'round' };
+      return { stroke: '#475569', strokeWidth: 1, strokeOpacity: 0.35, strokeLinecap: 'round' };
     case 'calls':
-      return { stroke: '#34d399', strokeWidth: 1.5, strokeLinecap: 'round' };
+      return { stroke: '#34d399', strokeWidth: 1.25, strokeOpacity: 0.45, strokeLinecap: 'round' };
     case 'imports':
     case 'imports_from':
-      return { stroke: '#818cf8', strokeWidth: 1.5, strokeLinecap: 'round' };
+      return { stroke: '#818cf8', strokeWidth: 1.25, strokeOpacity: 0.45, strokeLinecap: 'round' };
     case 'inherits':
     case 'implements':
-      return { stroke: '#fbbf24', strokeWidth: 2.5, strokeLinecap: 'round' };
+      return { stroke: '#fbbf24', strokeWidth: 2, strokeOpacity: 0.7, strokeLinecap: 'round' };
     case 'decorates':
-      return { stroke: '#fb7185', strokeWidth: 1.5, strokeLinecap: 'round' };
+      return { stroke: '#fb7185', strokeWidth: 1.25, strokeOpacity: 0.5, strokeLinecap: 'round' };
     default:
-      return { stroke: '#64748b', strokeWidth: 1.5, strokeLinecap: 'round' };
+      return { stroke: '#64748b', strokeWidth: 1.25, strokeOpacity: 0.4, strokeLinecap: 'round' };
   }
 }
