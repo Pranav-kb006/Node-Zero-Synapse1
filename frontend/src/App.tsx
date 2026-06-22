@@ -7,6 +7,7 @@ import BlastRadiusPage from './pages/BlastRadiusPage';
 import SmartBlamePage from './pages/SmartBlamePage';
 import GovernancePage from './pages/GovernancePage';
 import MentorPage from './pages/MentorPage';
+import ExplorerPage from './features/explorer/ExplorerPage';
 
 export default function App() {
   return (
@@ -18,6 +19,7 @@ export default function App() {
       {/* Dashboard & app pages wrapped in AppShell */}
       <Route element={<AppShell />}>
         <Route path="/dashboard" element={<DashboardPage />} />
+        <Route path="/explorer" element={<ExplorerPage />} />
         <Route path="/blast-radius" element={<BlastRadiusPage />} />
         <Route path="/smart-blame" element={<SmartBlamePage />} />
         <Route path="/governance" element={<GovernancePage />} />

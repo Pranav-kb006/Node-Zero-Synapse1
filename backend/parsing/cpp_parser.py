@@ -197,7 +197,7 @@ def parse_cpp_file(file_path: str) -> ParsedFile:
     tree = _cpp_parser.parse(bytes(code, "utf8"))
     root_node = tree.root_node
     
-    result = ParsedFile(file_path=file_path)
+    result = ParsedFile(file_path=file_path, language="cpp")
     line_counts = count_cpp_total_lines(code)
     
     result.module = ModuleEntity(

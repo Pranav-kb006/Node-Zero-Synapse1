@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
     LayoutDashboard,
+    Network,
     Radiation,
     Users,
     Shield,
@@ -11,6 +12,7 @@ import {
 /** Navigation items for the sidebar */
 const navItems = [
     { to: '/dashboard', icon: LayoutDashboard, label: 'Overview' },
+    { to: '/explorer', icon: Network, label: 'Explorer' },
     { to: '/blast-radius', icon: Radiation, label: 'Blast Radius' },
     { to: '/smart-blame', icon: Users, label: 'Smart Blame' },
     { to: '/governance', icon: Shield, label: 'Governance' },

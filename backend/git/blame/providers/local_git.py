@@ -66,7 +66,7 @@ class LocalGitProvider(GitProvider):
     def _initialize_repo(self) -> None:
         """Initialize the git repository."""
         try:
-            self._repo = Repo(self._repo_path)
+            self._repo = Repo(self._repo_path, search_parent_directories=True)
         except (InvalidGitRepositoryError, NoSuchPathError) as e:
             self._repo = None
             raise ValueError(f"Invalid git repository: {self._repo_path}") from e

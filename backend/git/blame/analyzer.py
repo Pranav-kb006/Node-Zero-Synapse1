@@ -15,6 +15,7 @@ from .models import (
     ExpertiseScore,
     ExpertRecommendation,
     ExpertiseHeatmap,
+    ModuleExpertise,
     SmartBlameConfig
 )
 from .providers.base import GitProvider
@@ -387,6 +388,91 @@ class SmartBlameAnalyzer:
         """
         await self.store.clear()
         self._analyzed_files.clear()
+
+    def identify_expert_sync(self, target: str, refresh: bool = False) -> ExpertRecommendation:
+        """Synchronous version of identify_expert for use with asyncio.to_thread."""
+        if not refresh:
+            cached_experts = self._get_experts_for_file_sync(target, limit=5)
+            if cached_experts:
+                return self._build_recommendation(target, cached_experts)
+        scores = self._analyze_file_sync(target)
+        return self._build_recommendation(target, scores)
+
+    def _get_experts_for_file_sync(self, file_path: str, limit: int = 5) -> List[ExpertiseScore]:
+        return self.store._by_file.get(file_path, [])[:limit]
+
+    def _analyze_file_sync(self, file_path: str) -> List[ExpertiseScore]:
+        all_commits = self.git.get_commits_for_file(file_path)
+        if not all_commits:
+            return []
+        contributors = self.git.get_all_contributors(file_path)
+        commits_by_dev: Dict[str, List[CommitAnalysis]] = defaultdict(list)
+        for commit in all_commits:
+            commits_by_dev[commit.author_email].append(commit)
+        scores = self.calculator.calculate_multiple(
+            contributors, file_path, commits_by_dev, all_commits
+        )
+        for score in scores:
+            file_path_key = score.target_path
+            email = score.developer.email
+            self.store._by_file.setdefault(file_path_key, []).append(score)
+            self.store._by_developer.setdefault(email, []).append(score)
+        self._analyzed_files.add(file_path)
+        return scores
+
+    def generate_heatmap_sync(self, root_path: Optional[str] = None, max_files: int = 100) -> ExpertiseHeatmap:
+        """Synchronous version of generate_heatmap for use with asyncio.to_thread."""
+        all_files = self.git.get_all_files()
+        if root_path:
+            all_files = [f for f in all_files if f.startswith(root_path)]
+        unanalyzed = [f for f in all_files if f not in self._analyzed_files]
+        for file_path in unanalyzed[:max_files]:
+            try:
+                self._analyze_file_sync(file_path)
+            except Exception:
+                pass
+        module_scores: Dict[str, List[ExpertiseScore]] = defaultdict(list)
+        for file_path_key, scores in self.store._by_file.items():
+            if root_path and not file_path_key.startswith(root_path):
+                continue
+            module = "/".join(file_path_key.split("/")[:-1]) if "/" in file_path_key else "."
+            module_scores[module].extend(scores)
+        result = ExpertiseHeatmap()
+        risk_areas = []
+        knowledge_gaps = []
+        for path, scores in module_scores.items():
+            unique_devs = set()
+            for s in scores:
+                unique_devs.add(s.developer.email)
+            bus_factor = len(unique_devs)
+            top_score = scores[0].total_score if scores else 0.0
+            has_gap = bus_factor <= 1
+            result.modules[path] = ModuleExpertise(
+                module_path=path,
+                experts=scores[:5],
+                bus_factor=bus_factor,
+                top_expert_score=top_score,
+                has_knowledge_gap=has_gap,
+            )
+            if bus_factor <= 2:
+                risk_areas.append(path)
+            if has_gap:
+                knowledge_gaps.append(path)
+        result.risk_areas = risk_areas
+        result.knowledge_gaps = knowledge_gaps
+        result.total_files_analyzed = sum(1 for _ in self._analyzed_files if not root_path or _.startswith(root_path))
+        result.total_developers = len(self.store._developers)
+        if result.modules:
+            result.average_bus_factor = sum(m.bus_factor for m in result.modules.values()) / len(result.modules)
+        return result
+
+    def get_bus_factor_analysis_sync(self) -> Dict[str, int]:
+        """Synchronous version of get_bus_factor_analysis for use with asyncio.to_thread."""
+        heatmap = self.generate_heatmap_sync(max_files=200)
+        return {
+            module_path: module.bus_factor
+            for module_path, module in heatmap.modules.items()
+        }
     
     async def get_statistics(self) -> Dict:
         """

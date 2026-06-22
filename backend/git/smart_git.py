@@ -9,6 +9,7 @@ For detailed documentation, see the blame submodule.
 
 from typing import Dict, List, Optional, Any
 import os
+import asyncio
 
 # Re-export from blame module for backward compatibility
 from .blame import (
@@ -85,7 +86,7 @@ async def get_git_blame(file_path: str, repo_path: Optional[str] = None) -> Dict
     """
     analyzer = await get_analyzer(repo_path)
     
-    recommendation = await analyzer.identify_expert(file_path)
+    recommendation = await asyncio.to_thread(analyzer.identify_expert_sync, file_path)
     
     return {
         "target": recommendation.target,
@@ -118,7 +119,7 @@ async def get_expertise_heatmap(
         ExpertiseHeatmap as dict
     """
     analyzer = await get_analyzer(repo_path)
-    heatmap = await analyzer.generate_heatmap(root_path)
+    heatmap = await asyncio.to_thread(analyzer.generate_heatmap_sync, root_path)
     return heatmap.to_dict()
 
 
@@ -133,7 +134,7 @@ async def get_bus_factor_analysis(repo_path: Optional[str] = None) -> Dict[str, 
         Dict mapping module paths to bus factor values
     """
     analyzer = await get_analyzer(repo_path)
-    return await analyzer.get_bus_factor_analysis()
+    return await asyncio.to_thread(analyzer.get_bus_factor_analysis_sync)
 
 
 async def get_knowledge_gaps(repo_path: Optional[str] = None) -> List[str]:
