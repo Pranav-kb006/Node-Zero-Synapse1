@@ -3,6 +3,7 @@ import type { ElkNode, ElkExtendedEdge } from 'elkjs/lib/elk-api';
 import type { ExplorerNode, ExplorerEdge } from '../types';
 import type { Node, Edge } from '@xyflow/react';
 import { nodeWidth, nodeHeight, edgeStyle } from './layoutWorkerHelpers';
+import { aggregateEdgeWidth } from '../graph/projection';
 
 interface LayoutOptions {
   algorithm: 'layered' | 'stress' | 'mrtree';
@@ -124,14 +125,27 @@ export function useLayoutWorker() {
 
         const rfEdges: Edge[] = explorerEdges
           .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
-          .map((e) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            type: 'smoothstep' as const,
-            style: edgeStyle(e.relation),
-            data: { relation: e.relation, weight: e.weight, members: e.members },
-          }));
+          .map((e) => {
+            const aggregated = e.aggregated === true || e.weight > 1;
+            const base = edgeStyle(e.relation);
+            const style = aggregated
+              ? { ...base, strokeWidth: aggregateEdgeWidth(e.weight) }
+              : base;
+            return {
+              id: e.id,
+              source: e.source,
+              target: e.target,
+              type: 'smoothstep' as const,
+              style,
+              // Show the dependency count on aggregated container edges.
+              label: aggregated && e.weight > 1 ? String(Math.round(e.weight)) : undefined,
+              labelStyle: { fill: 'rgba(255,255,255,0.55)', fontSize: 9, fontWeight: 600 },
+              labelBgStyle: { fill: 'rgba(10,10,12,0.85)' },
+              labelBgPadding: [3, 1] as [number, number],
+              labelBgBorderRadius: 3,
+              data: { relation: e.relation, weight: e.weight, members: e.members, aggregated },
+            };
+          });
 
         return { nodes: rfNodes, edges: rfEdges };
       } catch (err) {
