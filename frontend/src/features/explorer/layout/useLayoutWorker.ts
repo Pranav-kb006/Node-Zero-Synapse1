@@ -1,11 +1,8 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import type { ElkNode, ElkExtendedEdge } from 'elkjs/lib/elk-api';
 import type { ExplorerNode, ExplorerEdge } from '../types';
 import type { Node, Edge } from '@xyflow/react';
 import { nodeWidth, nodeHeight, edgeStyle } from './layoutWorkerHelpers';
-
-const WORKER_TIMEOUT_MS = 30_000;
-
 
 interface LayoutOptions {
   algorithm: 'layered' | 'stress' | 'mrtree';
@@ -19,56 +16,29 @@ interface LayoutResult {
   edges: Edge[];
 }
 
-interface PendingRequest {
-  resolve: (result: ElkNode) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+let cachedElkPromise: Promise<any> | null = null;
+
+function getElk(): Promise<any> {
+  if (!cachedElkPromise) {
+    cachedElkPromise = (async () => {
+      const ELK = (await import('elkjs/lib/elk.bundled')).default;
+      const elkWorkerSource = (await import('elkjs/lib/elk-worker.min.js?raw')).default;
+      const blob = new Blob([elkWorkerSource], { type: 'application/javascript' });
+      const workerUrl = URL.createObjectURL(blob);
+      return new ELK({ workerUrl });
+    })();
+  }
+  return cachedElkPromise;
 }
 
 export function useLayoutWorker() {
-  const workerRef = useRef<Worker | null>(null);
-  const pendingRef = useRef<Map<string, PendingRequest>>(new Map());
-  const requestIdRef = useRef(0);
   const [isComputing, setIsComputing] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    try {
-      const worker = new Worker(new URL('./layout.worker.ts', import.meta.url), { type: 'module' });
-
-      worker.onmessage = (e: MessageEvent) => {
-        const { requestId, result, error: errMsg } = e.data;
-        const pending = pendingRef.current.get(requestId);
-        if (!pending) return;
-
-        clearTimeout(pending.timer);
-        pendingRef.current.delete(requestId);
-
-        if (errMsg) {
-          pending.reject(new Error(errMsg));
-        } else {
-          pending.resolve(result as ElkNode);
-        }
-      };
-
-      worker.onerror = (e) => {
-        console.warn('Layout worker error:', e.message);
-        setError(new Error(e.message));
-      };
-
-      workerRef.current = worker;
-    } catch {
-      console.warn('Failed to create layout worker, will use main-thread fallback');
-    }
-
     return () => {
-      workerRef.current?.terminate();
-      workerRef.current = null;
-      for (const [, pending] of pendingRef.current) {
-        clearTimeout(pending.timer);
-        pending.reject(new Error('Worker terminated'));
-      }
-      pendingRef.current.clear();
+      abortRef.current?.abort();
     };
   }, []);
 
@@ -120,57 +90,16 @@ export function useLayoutWorker() {
       setIsComputing(true);
 
       try {
-        if (signal?.aborted) {
-          throw new Error('Aborted');
-        }
+        if (signal?.aborted) throw new Error('Aborted');
 
-        let layouted: ElkNode;
+        const elk = await getElk();
+        if (signal?.aborted) throw new Error('Aborted');
 
-        if (workerRef.current) {
-          layouted = await new Promise<ElkNode>((resolve, reject) => {
-            const id = String(++requestIdRef.current);
-            const timer = setTimeout(() => {
-              if (signal) signal.removeEventListener('abort', abortHandler);
-              pendingRef.current.delete(id);
-              reject(new Error('Layout worker timed out'));
-            }, WORKER_TIMEOUT_MS);
-
-            const abortHandler = () => {
-              clearTimeout(timer);
-              pendingRef.current.delete(id);
-              reject(new Error('Aborted'));
-            };
-
-            if (signal) {
-              signal.addEventListener('abort', abortHandler);
-            }
-
-            const onResolve = (res: ElkNode) => {
-              if (signal) signal.removeEventListener('abort', abortHandler);
-              resolve(res);
-            };
-            const onReject = (err: Error) => {
-              if (signal) signal.removeEventListener('abort', abortHandler);
-              reject(err);
-            };
-
-            pendingRef.current.set(id, { resolve: onResolve, reject: onReject, timer });
-            workerRef.current!.postMessage({
-              requestId: id,
-              elkGraph,
-              layoutOptions,
-            });
-          });
-        } else {
-          if (signal?.aborted) throw new Error('Aborted');
-          const ELK = await importFallbackElk();
-          const elk = new ELK();
-          layouted = await elk.layout(elkGraph, {
-            layoutOptions,
-            logging: false,
-          });
-          if (signal?.aborted) throw new Error('Aborted');
-        }
+        const layouted: ElkNode = await elk.layout(elkGraph, {
+          layoutOptions,
+          logging: false,
+        });
+        if (signal?.aborted) throw new Error('Aborted');
 
         const elkPosMap = new Map<string, ElkNode>();
         function walk(n: ElkNode) {
@@ -275,9 +204,4 @@ function buildElkNodes(
   }
 
   return elkNodes;
-}
-
-async function importFallbackElk() {
-  const mod = await import('elkjs/lib/elk.bundled');
-  return mod.default;
 }
