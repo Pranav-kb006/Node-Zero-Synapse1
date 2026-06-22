@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from backend.graph.code_graph import build_dependency_graph, CodeGraph
+from backend.api.explorer import build_explorer_response, ExplorerGraphResponse
 from backend.git.smart_git import (
     get_git_blame,
     get_expertise_heatmap,
@@ -271,17 +272,39 @@ def _resolve_graph_entity_id(identifier: str) -> Tuple[str, Dict[str, Any]]:
 
 def _infer_repo_path_from_raw_data(data: List[Dict[str, Any]]) -> Optional[str]:
     absolute_files: List[str] = []
+    project_root = os.path.abspath(os.path.join(BASE_DIR, "..", ".."))
     for entity in data:
         file_path = entity.get("file")
-        if isinstance(file_path, str) and file_path and os.path.isabs(file_path):
-            absolute_files.append(os.path.abspath(file_path))
+        if isinstance(file_path, str) and file_path:
+            # Normalize Windows paths for cross-platform compatibility
+            normalized = file_path.replace("\\", "/")
+            if os.path.isabs(normalized):
+                absolute_files.append(os.path.abspath(normalized))
+            else:
+                # Resolve relative paths against project root
+                resolved = os.path.normpath(os.path.join(project_root, normalized))
+                if os.path.isabs(resolved):
+                    absolute_files.append(resolved)
 
     if not absolute_files:
         return None
 
     try:
-        return os.path.commonpath(absolute_files)
-    except ValueError:
+        common = os.path.commonpath(absolute_files)
+        # Walk up from the common path to find the nearest git repository
+        import git as _git
+        check = common
+        while True:
+            try:
+                _git.Repo(check, search_parent_directories=True)
+                return check
+            except (_git.InvalidGitRepositoryError, _git.NoSuchPathError, Exception):
+                parent = os.path.dirname(check)
+                if parent == check:
+                    break
+                check = parent
+        return common
+    except (ValueError, OSError, Exception):
         return None
 
 
@@ -296,12 +319,21 @@ def _collect_graph_nodes_and_edges() -> Tuple[List[Dict[str, Any]], List[Dict[st
         store_data = store.get_node_data(node_id) or {}
         raw_data = raw_entity_map.get(node_id, {})
         merged = {**raw_data, **store_data}
+        if not merged.get("type"):
+            merged["type"] = "external"
         nodes.append({"id": node_id, **merged})
 
     edges: List[Dict[str, str]] = []
     for node_id in all_node_ids:
         for succ in store.successors(node_id):
-            edges.append({"source": node_id, "target": succ})
+            edge_data = store.get_edge_data(node_id, succ) or {}
+            edges.append({
+                "source": node_id,
+                "target": succ,
+                "type": edge_data.get("type", "CALLS"),
+                "weight": edge_data.get("weight", 1.0),
+                "context": edge_data.get("context"),
+            })
 
     return nodes, edges
 
@@ -411,8 +443,9 @@ def get_condensed_graph():
         degree = out_degree.get(node_id, 0) + in_degree.get(node_id, 0)
         entities_by_file.setdefault(file_key, []).append({
             "id": node_id,
-            "name": node.get("name", node_id),
+            "name": node.get("name") or node_id,
             "type": node.get("type", "function"),
+            "language": node.get("language", "python"),
             "risk_level": _risk_level_from_degree(degree),
             "complexity": complexity,
             "degree": degree,
@@ -420,10 +453,11 @@ def get_condensed_graph():
         })
 
     for entities in entities_by_file.values():
-        entities.sort(key=lambda entity: entity["name"])
+        entities.sort(key=lambda entity: entity["name"] or entity["id"])
 
     file_nodes: Dict[str, Dict[str, Any]] = {}
     for file_key, entities in entities_by_file.items():
+        languages = set(e.get("language", "python") for e in entities)
         file_nodes[file_key] = {
             "id": file_key,
             "type": "file",
@@ -433,6 +467,7 @@ def get_condensed_graph():
             "entity_count": len(entities),
             "risk_level": _highest_risk_level([entity["risk_level"] for entity in entities]),
             "total_complexity": sum(entity["complexity"] for entity in entities),
+            "languages": sorted(languages),
         }
 
     files_by_directory: Dict[str, List[Dict[str, Any]]] = {}
@@ -445,32 +480,40 @@ def get_condensed_graph():
 
     file_edge_counts: Dict[Tuple[str, str], int] = {}
     dir_edge_counts: Dict[Tuple[str, str], int] = {}
+    file_edge_types: Dict[Tuple[str, str], Dict[str, int]] = {}
+    dir_edge_types: Dict[Tuple[str, str], Dict[str, int]] = {}
     for edge in filtered_entity_edges:
         source_file = node_file_map[edge["source"]]
         target_file = node_file_map[edge["target"]]
         source_dir = node_dir_map[edge["source"]]
         target_dir = node_dir_map[edge["target"]]
+        edge_type = edge.get("type", "CALLS")
 
         if source_file != target_file:
             file_pair = (source_file, target_file)
             file_edge_counts[file_pair] = file_edge_counts.get(file_pair, 0) + 1
+            file_edge_types.setdefault(file_pair, {})[edge_type] = file_edge_types.get(file_pair, {}).get(edge_type, 0) + 1
 
         if source_dir != target_dir:
             dir_pair = (source_dir, target_dir)
             dir_edge_counts[dir_pair] = dir_edge_counts.get(dir_pair, 0) + 1
+            dir_edge_types.setdefault(dir_pair, {})[edge_type] = dir_edge_types.get(dir_pair, {}).get(edge_type, 0) + 1
 
     file_edges = [
-        {"source": source, "target": target, "weight": weight}
+        {"source": source, "target": target, "weight": weight, "types": file_edge_types.get((source, target), {})}
         for (source, target), weight in sorted(file_edge_counts.items())
     ]
 
     directory_edges = [
-        {"source": source, "target": target, "weight": weight}
+        {"source": source, "target": target, "weight": weight, "types": dir_edge_types.get((source, target), {})}
         for (source, target), weight in sorted(dir_edge_counts.items())
     ]
 
     directory_nodes = []
     for directory, directory_files in sorted(files_by_directory.items()):
+        all_langs = set()
+        for fn in directory_files:
+            all_langs.update(fn.get("languages", []))
         directory_nodes.append({
             "id": directory,
             "type": "directory",
@@ -479,6 +522,7 @@ def get_condensed_graph():
             "entity_count": sum(file_node["entity_count"] for file_node in directory_files),
             "risk_level": _highest_risk_level([file_node["risk_level"] for file_node in directory_files]),
             "total_complexity": sum(file_node["total_complexity"] for file_node in directory_files),
+            "languages": sorted(all_langs),
         })
 
     return {
@@ -490,170 +534,32 @@ def get_condensed_graph():
         "entity_edges": filtered_entity_edges,
     }
 
-    # Legacy implementation (kept unreachable for rollback safety).
-    cg = graph_db["code_graph"]
-    store = cg.store
 
-    # ── Collect all nodes and edges ──────────────────────────────
-    all_nodes = []
-    for node_id in store.get_all_nodes():
-        nd = store.get_node_data(node_id)
-        all_nodes.append({"id": node_id, **(nd or {})})
+@app.get("/graph/explorer", response_model=ExplorerGraphResponse)
+def get_explorer_graph(
+    root: Optional[str] = Query(None, description="Root node ID to start from"),
+    depth: Optional[int] = Query(None, ge=0, le=20, description="Max traversal depth from root"),
+    language: Optional[str] = Query(None, description="Comma-separated languages: python,java,cpp"),
+    kind: Optional[str] = Query(None, description="Comma-separated kinds: class,function,method,..."),
+):
+    """Versioned explorer graph (schema_version: 1).
 
-    all_edges = []
-    for node_id in store.get_all_nodes():
-        for succ in store.successors(node_id):
-            all_edges.append({"source": node_id, "target": succ})
+    Returns nodes, edges, and directory groups with risk, complexity,
+    language, and relationship metadata for the structural explorer.
+    """
+    raw_data = graph_db.get("raw_data", [])
+    code_graph = graph_db.get("code_graph")
+    if not code_graph:
+        raise HTTPException(status_code=503, detail="Graph not loaded yet")
 
-    # ── Helper: normalise file path to forward-slash, strip leading ./ ──
-    def _norm(file_path: str) -> str:
-        p = file_path.replace("\\", "/").lstrip("./")
-        return p
-
-    # ── Helper: derive directory key (first 2 segments) ─────────
-    def _dir_key(file_path: str) -> str:
-        p = _norm(file_path)
-        parts = p.split("/")
-        if len(parts) <= 2:
-            # e.g. "debug_chroma.py" → "root" or "backend/ai" stays as-is
-            if len(parts) == 1:
-                return "root"
-            return parts[0] if parts[0] != "" else "root"
-        return "/".join(parts[:2])
-
-    def _file_key(file_path: str) -> str:
-        return _norm(file_path)
-
-    # ── Build node-id → file/dir mappings ───────────────────────
-    node_file_map = {}       # node_id → normalised file path
-    node_dir_map = {}        # node_id → directory key
-    for n in all_nodes:
-        fp = n.get("file", "") or ""
-        nf = _file_key(fp)
-        node_file_map[n["id"]] = nf
-        node_dir_map[n["id"]] = _dir_key(fp)
-
-    # ── Risk helpers ────────────────────────────────────────────
-    def _degree(node_id):
-        out = sum(1 for e in all_edges if e["source"] == node_id)
-        inn = sum(1 for e in all_edges if e["target"] == node_id)
-        return out + inn
-
-    def _risk_level(total_degree):
-        if total_degree >= 8:
-            return "CRITICAL"
-        if total_degree >= 5:
-            return "HIGH"
-        if total_degree >= 2:
-            return "MEDIUM"
-        return "LOW"
-
-    RISK_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
-
-    def _highest_risk(levels):
-        if not levels:
-            return "LOW"
-        return max(levels, key=lambda r: RISK_ORDER.get(r, 0))
-
-    # ── Group entities by file ──────────────────────────────────
-    entities_by_file: dict = {}   # file_key → [entity dicts]
-    for n in all_nodes:
-        fk = node_file_map[n["id"]]
-        entities_by_file.setdefault(fk, [])
-        deg = _degree(n["id"])
-        complexity = 0
-        if isinstance(n.get("complexity"), dict):
-            complexity = n["complexity"].get("cyclomatic", 0)
-        elif isinstance(n.get("complexity"), (int, float)):
-            complexity = n["complexity"]
-        entities_by_file[fk].append({
-            "id": n["id"],
-            "name": n.get("name", n["id"]),
-            "type": n.get("type", "function"),
-            "risk_level": _risk_level(deg),
-            "complexity": complexity,
-            "degree": deg,
-            "line": n.get("range", [0])[0] if n.get("range") else 0,
-        })
-
-    # ── Build file nodes ────────────────────────────────────────
-    file_nodes = {}  # file_key → file node dict
-    for fk, entities in entities_by_file.items():
-        risks = [e["risk_level"] for e in entities]
-        total_cx = sum(e["complexity"] for e in entities)
-        file_nodes[fk] = {
-            "id": fk,
-            "type": "file",
-            "label": fk.split("/")[-1] if "/" in fk else fk,
-            "full_path": fk,
-            "directory": _dir_key(".\\" + fk.replace("/", "\\")),
-            "entity_count": len(entities),
-            "risk_level": _highest_risk(risks),
-            "total_complexity": total_cx,
-        }
-
-    # ── Build file-to-file edges (deduplicated, weighted) ───────
-    file_edge_counts: dict = {}   # (src_file, tgt_file) → count
-    for e in all_edges:
-        sf = node_file_map.get(e["source"], "")
-        tf = node_file_map.get(e["target"], "")
-        if sf and tf and sf != tf:
-            key = (sf, tf)
-            file_edge_counts[key] = file_edge_counts.get(key, 0) + 1
-
-    file_edges = [
-        {"source": k[0], "target": k[1], "weight": v}
-        for k, v in file_edge_counts.items()
-    ]
-
-    # ── Group files by directory ────────────────────────────────
-    files_by_directory: dict = {}
-    for fk, fnode in file_nodes.items():
-        dk = fnode["directory"]
-        files_by_directory.setdefault(dk, [])
-        files_by_directory[dk].append(fnode)
-
-    # ── Build directory nodes ───────────────────────────────────
-    directory_nodes = []
-    for dk, fnodes in files_by_directory.items():
-        risks = [fn["risk_level"] for fn in fnodes]
-        total_entities = sum(fn["entity_count"] for fn in fnodes)
-        total_cx = sum(fn["total_complexity"] for fn in fnodes)
-        directory_nodes.append({
-            "id": dk,
-            "type": "directory",
-            "label": dk,
-            "file_count": len(fnodes),
-            "entity_count": total_entities,
-            "risk_level": _highest_risk(risks),
-            "total_complexity": total_cx,
-        })
-
-    # ── Build directory-to-directory edges (deduplicated) ───────
-    dir_edge_counts: dict = {}
-    for e in all_edges:
-        sd = node_dir_map.get(e["source"], "")
-        td = node_dir_map.get(e["target"], "")
-        if sd and td and sd != td:
-            key = (sd, td)
-            dir_edge_counts[key] = dir_edge_counts.get(key, 0) + 1
-
-    directory_edges = [
-        {"source": k[0], "target": k[1], "weight": v}
-        for k, v in dir_edge_counts.items()
-    ]
-
-    # ── Entity-level edges (original) ───────────────────────────
-    entity_edges = all_edges
-
-    return {
-        "directory_nodes": directory_nodes,
-        "directory_edges": directory_edges,
-        "files_by_directory": files_by_directory,
-        "file_edges": file_edges,
-        "entities_by_file": entities_by_file,
-        "entity_edges": entity_edges,
-    }
+    return build_explorer_response(
+        raw_data,
+        code_graph,
+        root=root,
+        depth=depth,
+        language_filter=language,
+        kind_filter=kind,
+    )
 
 
 @app.get("/blast-radius/{function_name:path}/explain")
@@ -711,6 +617,49 @@ def get_blast_radius(function_name: str):
         "blast_radius_score": len(affected_nodes),
         "affected_functions": affected_nodes
     }
+
+
+@app.get("/git/diff")
+def get_git_diff(
+    repo_path: Optional[str] = Query(None, description="Path to repository"),
+):
+    """
+    Returns list of modified and untracked files in the active git repository.
+    """
+    path = _active_repo_path(repo_path)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Repository path not found")
+        
+    try:
+        import git
+        repo = git.Repo(path)
+        if repo.bare:
+            return {"changed_files": []}
+            
+        changed = set()
+        
+        # Diff index against working tree (modified files)
+        for item in repo.index.diff(None):
+            if item.a_path:
+                changed.add(item.a_path)
+            if item.b_path:
+                changed.add(item.b_path)
+                
+        # Diff HEAD against index (staged files)
+        if repo.head.is_valid():
+            for item in repo.index.diff("HEAD"):
+                if item.a_path:
+                    changed.add(item.a_path)
+                if item.b_path:
+                    changed.add(item.b_path)
+                    
+        # Untracked files
+        for ut in repo.untracked_files:
+            changed.add(ut)
+            
+        return {"changed_files": list(changed)}
+    except Exception:
+        return {"changed_files": []}
 
 
 @app.get("/git-risk/{file_path:path}")

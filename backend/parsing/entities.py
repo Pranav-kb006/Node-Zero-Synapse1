@@ -113,7 +113,7 @@ class FunctionEntity:
     
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "type": "function",
+            "type": "method" if self.is_method else "function",
             "name": self.name,
             "unique_id": self.unique_id,
             "file": self.file_path,
@@ -242,9 +242,21 @@ class ImportEntity:
     # Classification
     import_type: str = "unknown"            # "stdlib", "third_party", "local"
     
+    @property
+    def unique_id(self) -> str:
+        return f"{self.file_path}:import:{self.module}:{self.line}"
+
+    @property
+    def name(self) -> str:
+        if self.alias:
+            return self.alias
+        return self.module
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "type": "import",
+            "unique_id": self.unique_id,
+            "name": self.name,
             "file": self.file_path,
             "line": self.line,
             "module": self.module,
@@ -384,8 +396,27 @@ class ParsedFile:
         }
     
     def get_all_entities(self) -> List[Dict[str, Any]]:
-        """Get all entities as a flat list (for backward compatibility)."""
+        """Get all entities as a flat list including imports, variables, and modules."""
+        lang = self.language
         entities = []
-        entities.extend([f.to_dict() for f in self.functions])
-        entities.extend([c.to_dict() for c in self.classes])
+        for f in self.functions:
+            d = f.to_dict()
+            d["language"] = lang
+            entities.append(d)
+        for c in self.classes:
+            d = c.to_dict()
+            d["language"] = lang
+            entities.append(d)
+        for i in self.imports:
+            d = i.to_dict()
+            d["language"] = lang
+            entities.append(d)
+        for v in self.variables:
+            d = v.to_dict()
+            d["language"] = lang
+            entities.append(d)
+        if self.module:
+            d = self.module.to_dict()
+            d["language"] = lang
+            entities.append(d)
         return entities

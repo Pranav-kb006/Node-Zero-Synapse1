@@ -122,6 +122,10 @@
   background-color: #171717 !important;
 }
 
+.react-flow__edge-path {
+  fill: none;
+}
+
 /* ── AI Mentor Markdown Styles ──────────────────────── */
 .md-content p.md-p {
   margin: 0.4em 0;

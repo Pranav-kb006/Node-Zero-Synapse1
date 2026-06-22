@@ -3,6 +3,8 @@
  * All backend communication goes through this module.
  */
 
+import type { ExplorerGraphResponse } from '@/features/explorer/types';
+
 export const API_BASE =
     import.meta.env.VITE_API_URL ??
     import.meta.env.VITE_BACKEND_URL ??
@@ -223,6 +225,10 @@ export const api = {
         const params = repoPath ? `?repo_path=${encodeURIComponent(repoPath)}` : '';
         return apiFetch<{ knowledge_gaps: string[]; total_gaps: number }>(`/blame/gaps${params}`);
     },
+    getGitDiff: (repoPath?: string) => {
+        const params = repoPath ? `?repo_path=${encodeURIComponent(repoPath)}` : '';
+        return apiFetch<{ changed_files: string[] }>(`/git/diff${params}`);
+    },
 
     // Governance
     getViolations: (repoPath?: string) => {
@@ -261,4 +267,20 @@ export const api = {
             body: JSON.stringify({ url }),
         }),
     getUploadStatus: () => apiFetch<UploadStatusResponse>('/upload/status'),
+
+    // Explorer
+    getExplorerGraph: (params?: {
+        root?: string;
+        depth?: number;
+        language?: string;
+        kind?: string;
+    }) => {
+        const searchParams = new URLSearchParams();
+        if (params?.root) searchParams.set('root', params.root);
+        if (params?.depth !== undefined) searchParams.set('depth', String(params.depth));
+        if (params?.language) searchParams.set('language', params.language);
+        if (params?.kind) searchParams.set('kind', params.kind);
+        const qs = searchParams.toString();
+        return apiFetch<ExplorerGraphResponse>(`/graph/explorer${qs ? '?' + qs : ''}`);
+    },
 };

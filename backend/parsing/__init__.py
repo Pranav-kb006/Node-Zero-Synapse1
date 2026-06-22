@@ -37,6 +37,15 @@ from .parser import (
 
 from .java_parser import parse_java_file
 
+from .cpp_parser import parse_cpp_file
+
+from .cpp_complexity import (
+    calculate_cpp_cyclomatic_complexity,
+    calculate_cpp_cognitive_complexity,
+    count_cpp_lines_of_code,
+    count_cpp_total_lines,
+)
+
 from .java_complexity import (
     calculate_java_cyclomatic_complexity,
     calculate_java_cognitive_complexity,
@@ -78,4 +87,11 @@ __all__ = [
     "get_all_entities",
     # Java-specific entry point
     "parse_java_file",
+    # C++-specific entry point
+    "parse_cpp_file",
+    # C++ Complexity
+    "calculate_cpp_cyclomatic_complexity",
+    "calculate_cpp_cognitive_complexity",
+    "count_cpp_lines_of_code",
+    "count_cpp_total_lines",
 ]

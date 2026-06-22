@@ -516,39 +516,69 @@ def build_dependency_graph(data: List[Dict]) -> CodeGraph:
     """
     graph = CodeGraph()
     
-    # Add all entities as nodes
+    # Add all entities as nodes with rich metadata
     for entity in data:
         entity_id = entity.get("unique_id") or entity.get("name")
-        graph.add_entity(entity_id, metadata={
+        if not entity_id:
+            continue
+        metadata = {
             "type": entity.get("type"),
             "file": entity.get("file"),
             "name": entity.get("name"),
-            "range": entity.get("range")
-        })
+            "range": entity.get("range"),
+            "language": entity.get("language", "python"),
+        }
+        if entity.get("type") == "import":
+            metadata["module"] = entity.get("module")
+            metadata["imported_names"] = entity.get("imported_names")
+        elif entity.get("type") == "variable":
+            metadata["scope"] = entity.get("scope")
+            metadata["parent"] = entity.get("parent")
+        elif entity.get("type") == "module":
+            metadata["metrics"] = entity.get("metrics")
+        graph.add_entity(entity_id, metadata=metadata)
     
-    # Build a lookup for entities
-    entities_by_name = {}
+    # Build lookups for resolution
+    entities_by_name: Dict[str, List[Dict]] = {}
+    entities_by_id: Dict[str, Dict] = {}
     for entity in data:
+        eid = entity.get("unique_id") or entity.get("name")
+        if not eid:
+            continue
+        entities_by_id[eid] = entity
         name = entity.get("name")
         if name:
-            if name not in entities_by_name:
-                entities_by_name[name] = []
-            entities_by_name[name].append(entity)
+            entities_by_name.setdefault(name, []).append(entity)
+    
+    # Build file -> entity mapping for CONTAINS edges
+    entities_by_file: Dict[str, List[Dict]] = {}
+    for entity in data:
+        f = entity.get("file")
+        eid = entity.get("unique_id") or entity.get("name")
+        if f and eid:
+            entities_by_file.setdefault(f, []).append(entity)
+    
+    # Build import lookup: module_name -> entity_id for resolution
+    import_modules: Dict[str, str] = {}
+    for entity in data:
+        if entity.get("type") == "import":
+            module = entity.get("module", "")
+            eid = entity.get("unique_id") or entity.get("name", "")
+            if module and eid:
+                import_modules[module] = eid
     
     print("[*] Building Links...")
     
-    # Add call relationships
+    # --- CALLS relationships ---
     for entity in data:
-        if entity.get("type") != "function":
+        if entity.get("type") not in ("function", "method"):
             continue
             
         caller_id = entity.get("unique_id") or entity.get("name")
         calls = entity.get("calls", [])
         
         for call_str in calls:
-            # Try to resolve the call
             target_id = _resolve_call(call_str, entities_by_name)
-            
             if target_id:
                 rel = Relationship(
                     source=caller_id,
@@ -559,7 +589,7 @@ def build_dependency_graph(data: List[Dict]) -> CodeGraph:
                 graph.add_relationship(rel)
                 print(f"  [LINK] {caller_id} -> {target_id}")
     
-    # Add inheritance relationships for classes
+    # --- INHERITS relationships ---
     for entity in data:
         if entity.get("type") != "class":
             continue
@@ -568,20 +598,177 @@ def build_dependency_graph(data: List[Dict]) -> CodeGraph:
         bases = entity.get("bases", [])
         
         for base in bases:
-            # Try to find base class
             base_entities = entities_by_name.get(base, [])
             if base_entities:
                 base_id = base_entities[0].get("unique_id") or base
             else:
                 base_id = base
             
+            rel_type = RelationType.IMPLEMENTS if entity.get("is_interface") else RelationType.INHERITS
             rel = Relationship(
                 source=class_id,
                 target=base_id,
-                rel_type=RelationType.INHERITS
+                rel_type=rel_type
             )
             graph.add_relationship(rel)
-            print(f"  [INHERITS] {class_id} -> {base_id}")
+            print(f"  [{rel_type.value}] {class_id} -> {base_id}")
+    
+    # --- IMPORTS relationships ---
+    for entity in data:
+        if entity.get("type") != "import":
+            continue
+        
+        file_path = entity.get("file", "")
+        module = entity.get("module", "")
+        imported_names = entity.get("imported_names", [])
+        entity_id = entity.get("unique_id") or entity.get("name", "")
+        
+        # Find the file/module entity that contains this import
+        file_entities = entities_by_file.get(file_path, [])
+        file_module_id = None
+        for fe in file_entities:
+            if fe.get("type") == "module":
+                file_module_id = fe.get("unique_id") or fe.get("name")
+                break
+        
+        if not file_module_id:
+            # Use file path as fallback module id
+            file_module_id = file_path
+        
+        # Create IMPORTS edge from the importing file's module to the imported module entity
+        # Try to find the imported module in the graph
+        target_module_id = None
+        # Check if any entity's file matches the import module
+        for eid, ent in entities_by_id.items():
+            ent_file = ent.get("file", "")
+            ent_name = ent.get("name", "")
+            if ent_file and module and (ent_file.endswith(module.replace(".", "/") + ".py") or ent_name == module):
+                target_module_id = eid
+                break
+        
+        # Also try matching by module name directly
+        if not target_module_id:
+            target_module_id = import_modules.get(module)
+        
+        if target_module_id and target_module_id != file_module_id:
+            rel = Relationship(
+                source=file_module_id,
+                target=target_module_id,
+                rel_type=RelationType.IMPORTS,
+                context=module
+            )
+            graph.add_relationship(rel)
+        
+        # Create IMPORTS_FROM edges for specific names
+        if imported_names and imported_names != ["*"] and target_module_id:
+            for name in imported_names:
+                name_entities = entities_by_name.get(name, [])
+                for ne in name_entities:
+                    ne_id = ne.get("unique_id") or ne.get("name")
+                    if ne_id and ne_id != file_module_id:
+                        rel = Relationship(
+                            source=file_module_id,
+                            target=ne_id,
+                            rel_type=RelationType.IMPORTS_FROM,
+                            context=f"from {module} import {name}"
+                        )
+                        graph.add_relationship(rel)
+                        break
+    
+    # --- CONTAINS relationships (module -> functions/classes) ---
+    for entity in data:
+        if entity.get("type") != "module":
+            continue
+        
+        module_id = entity.get("unique_id") or entity.get("name")
+        module_functions = entity.get("functions", [])
+        module_classes = entity.get("classes", [])
+        
+        for func_name in module_functions:
+            func_entities = entities_by_name.get(func_name, [])
+            for fe in func_entities:
+                fe_id = fe.get("unique_id") or fe.get("name")
+                if fe_id and fe.get("file") == entity.get("file"):
+                    rel = Relationship(
+                        source=module_id,
+                        target=fe_id,
+                        rel_type=RelationType.CONTAINS
+                    )
+                    graph.add_relationship(rel)
+                    break
+        
+        for class_name in module_classes:
+            class_entities = entities_by_name.get(class_name, [])
+            for ce in class_entities:
+                ce_id = ce.get("unique_id") or ce.get("name")
+                if ce_id and ce.get("file") == entity.get("file"):
+                    rel = Relationship(
+                        source=module_id,
+                        target=ce_id,
+                        rel_type=RelationType.CONTAINS
+                    )
+                    graph.add_relationship(rel)
+                    break
+    
+    # --- READS_GLOBAL / WRITES_GLOBAL relationships ---
+    for entity in data:
+        if entity.get("type") not in ("function", "method"):
+            continue
+        
+        func_id = entity.get("unique_id") or entity.get("name")
+        reads = entity.get("reads_globals", [])
+        writes = entity.get("writes_globals", [])
+        
+        for var_name in reads:
+            var_entities = entities_by_name.get(var_name, [])
+            for ve in var_entities:
+                if ve.get("type") == "variable":
+                    ve_id = ve.get("unique_id") or ve.get("name")
+                    rel = Relationship(
+                        source=func_id,
+                        target=ve_id,
+                        rel_type=RelationType.READS_GLOBAL,
+                        context=var_name
+                    )
+                    graph.add_relationship(rel)
+                    break
+        
+        for var_name in writes:
+            var_entities = entities_by_name.get(var_name, [])
+            for ve in var_entities:
+                if ve.get("type") == "variable":
+                    ve_id = ve.get("unique_id") or ve.get("name")
+                    rel = Relationship(
+                        source=func_id,
+                        target=ve_id,
+                        rel_type=RelationType.WRITES_GLOBAL,
+                        context=var_name
+                    )
+                    graph.add_relationship(rel)
+                    break
+    
+    # --- DECORATES relationships ---
+    for entity in data:
+        if entity.get("type") not in ("function", "class", "method"):
+            continue
+        
+        decorators = entity.get("decorators", [])
+        if not decorators:
+            continue
+        
+        entity_id = entity.get("unique_id") or entity.get("name")
+        for deco in decorators:
+            deco_entities = entities_by_name.get(deco, [])
+            for de in deco_entities:
+                de_id = de.get("unique_id") or de.get("name")
+                rel = Relationship(
+                    source=de_id,
+                    target=entity_id,
+                    rel_type=RelationType.DECORATES,
+                    context=deco
+                )
+                graph.add_relationship(rel)
+                break
     
     return graph
 

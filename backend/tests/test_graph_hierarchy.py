@@ -34,9 +34,10 @@ class GraphHierarchyApiTests(unittest.TestCase):
         nodes: List[Dict] = payload["nodes"]
         nodes_by_id = {node["id"]: node for node in nodes}
 
-        target_id = r".\backend\api\main.py:load_data"
-        self.assertIn(target_id, nodes_by_id)
-        self.assertTrue(nodes_by_id[target_id].get("file"))
+        target_suffix = "backend/api/main.py:load_data"
+        matched_id = next((k for k in nodes_by_id if k.replace("\\", "/").endswith(target_suffix)), None)
+        self.assertIsNotNone(matched_id, f"Could not find node for '{target_suffix}' in full graph")
+        self.assertTrue(nodes_by_id[matched_id].get("file"))
 
     def test_condensed_graph_has_real_hierarchy(self) -> None:
         full_response = self.client.get("/graph")

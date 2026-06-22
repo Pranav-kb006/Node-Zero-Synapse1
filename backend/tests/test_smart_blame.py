@@ -10,8 +10,8 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-# Add backend/core to path
-backend_core = str(Path(__file__).parent.parent / "core")
+# Add backend/git to path
+backend_core = str(Path(__file__).parent.parent / "git")
 sys.path.insert(0, backend_core)
 
 from blame.models import (
@@ -239,7 +239,7 @@ def test_expertise_calculator():
     print(f"ExpertiseScoreCalculator (total={score.total_score:.2f}): PASSED")
 
 
-async def test_in_memory_store():
+async def async_test_in_memory_store():
     """Test InMemoryStore functionality."""
     store = InMemoryStore()
     
@@ -307,7 +307,7 @@ def test_local_git_provider():
         print(f"LocalGitProvider: SKIPPED ({e})")
 
 
-async def test_smart_blame_analyzer():
+async def async_test_smart_blame_analyzer():
     """Test SmartBlameAnalyzer with actual repo."""
     from blame.analyzer import create_analyzer
     
@@ -354,11 +354,11 @@ def run_tests():
     test_expertise_calculator()
     
     print("\n--- Store Tests ---")
-    asyncio.run(test_in_memory_store())
+    asyncio.run(async_test_in_memory_store())
     
     print("\n--- Integration Tests ---")
     test_local_git_provider()
-    asyncio.run(test_smart_blame_analyzer())
+    asyncio.run(async_test_smart_blame_analyzer())
     
     print("\n" + "=" * 60)
     print("ALL TESTS PASSED")

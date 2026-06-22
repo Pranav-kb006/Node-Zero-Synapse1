@@ -5,6 +5,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
+import type { ExplorerFilters } from '@/features/explorer/types';
 
 // ─── Query keys ────────────────────────────────────────
 
@@ -12,6 +13,7 @@ export const queryKeys = {
     health: ['health'] as const,
     graph: ['graph'] as const,
     condensedGraph: ['condensedGraph'] as const,
+    explorer: (filters: ExplorerFilters) => ['explorer', filters] as const,
     blastRadius: (fn: string) => ['blastRadius', fn] as const,
     expert: (file: string) => ['expert', file] as const,
     heatmap: (module?: string) => ['heatmap', module] as const,
@@ -46,6 +48,14 @@ export function useCondensedGraph() {
     return useQuery({
         queryKey: queryKeys.condensedGraph,
         queryFn: api.getCondensedGraph,
+        staleTime: 60_000,
+    });
+}
+
+export function useExplorerGraph(filters: ExplorerFilters = {}) {
+    return useQuery({
+        queryKey: queryKeys.explorer(filters),
+        queryFn: () => api.getExplorerGraph(filters),
         staleTime: 60_000,
     });
 }
@@ -117,6 +127,15 @@ export function useLayers() {
         staleTime: 5 * 60_000,
     });
 }
+
+export function useGitDiff() {
+    return useQuery({
+        queryKey: ['git-diff'],
+        queryFn: () => api.getGitDiff(),
+        staleTime: 30_000,
+    });
+}
+
 
 // ─── AI hooks ──────────────────────────────────────────
 
