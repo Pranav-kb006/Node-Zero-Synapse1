@@ -5,58 +5,117 @@ import type { Node, Edge } from '@xyflow/react';
 
 const elk = new ELK();
 
-const ELK_OPTIONS = {
-  'elk.algorithm': 'mrtree',
-  'elk.direction': 'DOWN',
-  'elk.spacing.nodeNode': '40',
-  'elk.spacing.nodeNodeBetweenLayers': '60',
-  'elk.partitioning.quick': 'true',
-  'elk.hierarchyHandling': 'INCLUDE_CHILDREN',
-};
+// ─── Node sizing ──────────────────────────────────────
 
-interface LayoutOptions {
-  width: number;
-  height: number;
-}
-
-function nodeKindToWidth(kind: string): number {
+function nodeWidth(kind: string): number {
   switch (kind) {
-    case 'directory': return 280;
-    case 'file': return 220;
+    case 'directory': return 260;
+    case 'file': return 200;
     case 'class':
     case 'interface':
     case 'enum':
-    case 'struct': return 200;
-    default: return 160;
+    case 'struct': return 180;
+    default: return 140;
   }
 }
 
-function nodeKindToHeight(kind: string): number {
+function nodeHeight(kind: string): number {
   switch (kind) {
-    case 'directory': return 80;
-    case 'file': return 64;
-    default: return 48;
+    case 'directory': return 72;
+    case 'file': return 56;
+    default: return 40;
   }
 }
 
-export async function computeLayout(
+// ─── Public API ───────────────────────────────────────
+
+/**
+ * Layout the coarse view: directories + files only.
+ * Entities are hidden until a file is clicked.
+ */
+/**
+ * Layout whatever nodes are passed — no filtering.
+ * The caller decides what to include (dirs-only, dirs+files, or expanded).
+ */
+export async function computeCoarseLayout(
   explorerNodes: ExplorerNode[],
   explorerEdges: ExplorerEdge[],
-  options: LayoutOptions,
 ): Promise<{ nodes: Node[]; edges: Edge[] }> {
+  return computeLayout(explorerNodes, explorerEdges, {
+    algorithm: 'layered',
+    direction: 'DOWN',
+    spacing: { nodeNode: 60, betweenLayers: 80 },
+    compound: true,
+  });
+}
+
+/**
+ * Layout entities inside a single file's context.
+ * Returns nodes positioned around the file node.
+ */
+export async function computeEntityLayout(
+  fileNode: ExplorerNode,
+  entityNodes: ExplorerNode[],
+  entityEdges: ExplorerEdge[],
+): Promise<{ nodes: Node[]; edges: Edge[] }> {
+  if (entityNodes.length === 0) return { nodes: [], edges: [] };
+
+  return computeLayout(entityNodes, entityEdges, {
+    algorithm: 'layered',
+    direction: 'DOWN',
+    spacing: { nodeNode: 30, betweenLayers: 50 },
+    compound: false,
+  });
+}
+
+// ─── Core layout engine ──────────────────────────────
+
+interface LayoutConfig {
+  algorithm: 'layered' | 'stress' | 'mrtree';
+  direction: 'DOWN' | 'LEFT' | 'RIGHT' | 'UP';
+  spacing: { nodeNode: number; betweenLayers: number };
+  compound: boolean;
+}
+
+async function computeLayout(
+  explorerNodes: ExplorerNode[],
+  explorerEdges: ExplorerEdge[],
+  config: LayoutConfig,
+): Promise<{ nodes: Node[]; edges: Edge[] }> {
+  if (explorerNodes.length === 0) return { nodes: [], edges: [] };
+
   const nodeMap = new Map(explorerNodes.map((n) => [n.id, n]));
 
-  const elkNodes: ElkNode[] = explorerNodes.map((n) => ({
-    id: n.id,
-    width: nodeKindToWidth(n.kind),
-    height: nodeKindToHeight(n.kind),
-  }));
+  // Build ELK nodes with compound hierarchy
+  const elkNodes = buildElkNodes(explorerNodes, config);
 
-  const elkEdges: ElkExtendedEdge[] = explorerEdges.map((e) => ({
-    id: e.id,
-    sources: [e.source],
-    targets: [e.target],
-  }));
+  // Build ELK edges (only between visible nodes)
+  const visibleIds = new Set(explorerNodes.map((n) => n.id));
+  const elkEdges: ElkExtendedEdge[] = explorerEdges
+    .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
+    .map((e) => ({
+      id: e.id,
+      sources: [e.source],
+      targets: [e.target],
+    }));
+
+  const layoutOptions: Record<string, string> = {
+    'elk.algorithm': config.algorithm,
+    'elk.direction': config.direction,
+    'elk.spacing.nodeNode': String(config.spacing.nodeNode),
+    'elk.spacing.nodeNodeBetweenLayers': String(config.spacing.betweenLayers),
+    'elk.layered.spacing.nodeNodeBetweenLayers': String(config.spacing.betweenLayers),
+    'elk.edgeRouting': 'orthogonal',
+    'elk.layered.edgeRouting': 'ORTHOGONAL',
+    'elk.layered.placement.straightness': 'STRAIGHTNESS',
+    'elk.layered.spacing.baseValue': String(config.spacing.nodeNode),
+    'elk.separateConnectedComponents': 'false',
+  };
+
+  if (config.compound) {
+    layoutOptions['elk.hierarchyHandling'] = 'INCLUDE_CHILDREN';
+    layoutOptions['elk containment.insideEdges.toLayout'] = 'true';
+  }
 
   const graph: ElkNode = {
     id: 'root',
@@ -67,70 +126,155 @@ export async function computeLayout(
   let layouted: ElkNode;
   try {
     layouted = await elk.layout(graph, {
-      layoutOptions: ELK_OPTIONS,
+      layoutOptions,
       logging: false,
       measureNodeHierarchy: true,
     });
-  } catch {
-    // Fallback: return nodes in a grid if ELK fails
-    const cols = Math.ceil(Math.sqrt(explorerNodes.length));
-    const nodes: Node[] = explorerNodes.map((n, i) => ({
-      id: n.id,
-      type: n.kind === 'directory' ? 'directory' : n.kind === 'file' ? 'file' : 'entity',
-      position: {
-        x: (i % cols) * 300,
-        y: Math.floor(i / cols) * 120,
-      },
-      data: { ...n, label: n.name },
-    }));
-    const edges: Edge[] = explorerEdges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      type: 'smoothstep',
-      style: { strokeWidth: 1.5, stroke: 'rgba(255,255,255,0.15)' },
-      data: { relation: e.relation, weight: e.weight, members: e.members },
-    }));
-    return { nodes, edges };
+  } catch (err) {
+    console.warn('ELK layout failed, using grid fallback', err);
+    return gridFallback(explorerNodes, explorerEdges);
   }
 
-  const nodes: Node[] = [];
-  const elkNodeMap = new Map<string, ElkNode>();
-
-  function collectNodes(n: ElkNode) {
-    elkNodeMap.set(n.id, n);
-    if (n.children) {
-      for (const child of n.children) {
-        collectNodes(child);
-      }
-    }
+  // Collect all positioned nodes (including nested children)
+  const elkPosMap = new Map<string, ElkNode>();
+  function walk(n: ElkNode) {
+    elkPosMap.set(n.id, n);
+    n.children?.forEach(walk);
   }
-  collectNodes(layouted);
+  walk(layouted);
 
-  for (const en of explorerNodes) {
-    const elkN = elkNodeMap.get(en.id);
-    const w = nodeKindToWidth(en.kind);
-    const h = nodeKindToHeight(en.kind);
-    const x = (elkN?.x ?? 0);
-    const y = (elkN?.y ?? 0);
-
+  // Convert to React Flow nodes
+  const rfNodes: Node[] = explorerNodes.map((en) => {
+    const elkN = elkPosMap.get(en.id);
+    const w = nodeWidth(en.kind);
+    const h = nodeHeight(en.kind);
+    const x = elkN?.x ?? 0;
+    const y = elkN?.y ?? 0;
     const rawNode = nodeMap.get(en.id);
-    nodes.push({
+
+    return {
       id: en.id,
       type: en.kind === 'directory' ? 'directory' : en.kind === 'file' ? 'file' : 'entity',
       position: { x, y },
       data: { ...en, label: en.name, metadata: rawNode?.metadata ?? {} },
-    });
+    };
+  });
+
+  // Convert to React Flow edges
+  const rfEdges: Edge[] = explorerEdges
+    .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
+    .map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      type: 'smoothstep',
+      style: edgeStyle(e.relation),
+      data: { relation: e.relation, weight: e.weight, members: e.members },
+    }));
+
+  return { nodes: rfNodes, edges: rfEdges };
+}
+
+// ─── Helpers ──────────────────────────────────────────
+
+function buildElkNodes(
+  explorerNodes: ExplorerNode[],
+  config: LayoutConfig,
+): ElkNode[] {
+  // Group files by directory for compound nodes
+  const dirChildren = new Map<string, ExplorerNode[]>();
+  const topLevel: ExplorerNode[] = [];
+
+  for (const n of explorerNodes) {
+    if (n.kind === 'directory') {
+      topLevel.push(n);
+    } else if (n.kind === 'file') {
+      const dirId = n.parent_id ?? 'root';
+      if (!dirChildren.has(dirId)) dirChildren.set(dirId, []);
+      dirChildren.get(dirId)!.push(n);
+    } else {
+      topLevel.push(n);
+    }
   }
 
+  const elkNodes: ElkNode[] = [];
+
+  for (const n of topLevel) {
+    if (n.kind === 'directory' && config.compound) {
+      const children = dirChildren.get(n.id) ?? [];
+      elkNodes.push({
+        id: n.id,
+        width: nodeWidth(n.kind),
+        height: nodeHeight(n.kind),
+        children: children.map((c) => ({
+          id: c.id,
+          width: nodeWidth(c.kind),
+          height: nodeHeight(c.kind),
+        })),
+      });
+    } else {
+      elkNodes.push({
+        id: n.id,
+        width: nodeWidth(n.kind),
+        height: nodeHeight(n.kind),
+      });
+    }
+  }
+
+  // Add any file nodes whose parent directory wasn't in the node list
+  for (const n of explorerNodes) {
+    if (n.kind === 'file' && !elkNodes.some((ek) => ek.id === n.id)) {
+      elkNodes.push({
+        id: n.id,
+        width: nodeWidth(n.kind),
+        height: nodeHeight(n.kind),
+      });
+    }
+  }
+
+  return elkNodes;
+}
+
+function edgeStyle(relation: string): React.CSSProperties {
+  switch (relation) {
+    case 'contains':
+      return { stroke: '#475569', strokeWidth: 1.5, strokeLinecap: 'round' };
+    case 'calls':
+      return { stroke: '#34d399', strokeWidth: 1.5, strokeLinecap: 'round' };
+    case 'imports':
+    case 'imports_from':
+      return { stroke: '#818cf8', strokeWidth: 1.5, strokeLinecap: 'round' };
+    case 'inherits':
+    case 'implements':
+      return { stroke: '#fbbf24', strokeWidth: 2.5, strokeLinecap: 'round' };
+    case 'decorates':
+      return { stroke: '#fb7185', strokeWidth: 1.5, strokeLinecap: 'round' };
+    default:
+      return { stroke: '#64748b', strokeWidth: 1.5, strokeLinecap: 'round' };
+  }
+}
+
+function gridFallback(
+  explorerNodes: ExplorerNode[],
+  explorerEdges: ExplorerEdge[],
+): { nodes: Node[]; edges: Edge[] } {
+  const cols = Math.ceil(Math.sqrt(explorerNodes.length));
+  const nodes: Node[] = explorerNodes.map((n, i) => ({
+    id: n.id,
+    type: n.kind === 'directory' ? 'directory' : n.kind === 'file' ? 'file' : 'entity',
+    position: {
+      x: (i % cols) * 280,
+      y: Math.floor(i / cols) * 100,
+    },
+    data: { ...n, label: n.name },
+  }));
   const edges: Edge[] = explorerEdges.map((e) => ({
     id: e.id,
     source: e.source,
     target: e.target,
-    type: 'smoothstep',
-    style: { strokeWidth: 1.5, stroke: 'rgba(255,255,255,0.15)' },
+    type: 'default',
+    style: edgeStyle(e.relation),
     data: { relation: e.relation, weight: e.weight, members: e.members },
   }));
-
   return { nodes, edges };
 }
