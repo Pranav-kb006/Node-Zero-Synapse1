@@ -1,7 +1,9 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { FileCode, ChevronRight } from 'lucide-react';
-import type { ExplorerNode } from '../types';
+import type { ExplorerNode } from './types';
+
+import type { PersonaFilterConfig } from './personas/PersonaPresets';
 
 function riskColor(level?: string) {
   switch (level) {
@@ -22,14 +24,22 @@ function langBadge(lang?: string) {
 }
 
 function FileNodeComponent({ data }: NodeProps) {
-  const node = data as unknown as ExplorerNode & { metadata: Record<string, unknown> };
-  const rc = riskColor(node.risk?.level);
+  const node = data as unknown as ExplorerNode & { metadata: Record<string, unknown>; personaConfig?: PersonaFilterConfig };
+  const persona = node.personaConfig;
+  const showRisk = persona?.showRisk ?? true;
+  const showComplexity = persona?.showComplexity ?? true;
+  const nodeScale = persona?.nodeScale ?? 1;
+
+  const rc = riskColor(showRisk ? node.risk?.level : undefined);
   const entityCount = (node.metadata?.entity_count as number) ?? 0;
   const complexity = (node.metadata?.complexity_sum as number) ?? 0;
   const badge = langBadge(node.language);
 
   return (
-    <div className={`relative group rounded-lg border ${rc.border} bg-synapse-surface/80 backdrop-blur-sm shadow-md min-w-[200px] transition-all duration-200 hover:shadow-lg`}>
+    <div 
+      style={{ transform: `scale(${nodeScale})`, transformOrigin: 'center' }}
+      className={`relative group rounded-lg border ${rc.border} bg-synapse-surface/80 backdrop-blur-sm shadow-md min-w-[200px] transition-all duration-200 hover:shadow-lg`}
+    >
       <Handle type="target" position={Position.Top} className="!bg-white/20 !w-1.5 !h-1.5 !border-0" />
       <div className="flex items-center gap-2 px-3 py-2">
         <div className={`flex-shrink-0 p-1 rounded ${rc.bg} ${rc.border} border`}>
@@ -46,7 +56,7 @@ function FileNodeComponent({ data }: NodeProps) {
           </div>
           <p className="text-[9px] text-white/35 mt-0.5">
             {entityCount} ent
-            {complexity > 0 && <span className="ml-1">· {complexity} cx</span>}
+            {showComplexity && complexity > 0 && <span className="ml-1">· {complexity} cx</span>}
           </p>
         </div>
         <ChevronRight className="w-3 h-3 text-white/15 group-hover:text-white/30 transition-colors" />

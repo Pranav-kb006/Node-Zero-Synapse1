@@ -225,6 +225,10 @@ export const api = {
         const params = repoPath ? `?repo_path=${encodeURIComponent(repoPath)}` : '';
         return apiFetch<{ knowledge_gaps: string[]; total_gaps: number }>(`/blame/gaps${params}`);
     },
+    getGitDiff: (repoPath?: string) => {
+        const params = repoPath ? `?repo_path=${encodeURIComponent(repoPath)}` : '';
+        return apiFetch<{ changed_files: string[] }>(`/git/diff${params}`);
+    },
 
     // Governance
     getViolations: (repoPath?: string) => {

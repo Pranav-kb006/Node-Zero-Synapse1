@@ -21,6 +21,8 @@
     "elkjs": "^0.11.1",
     "firebase": "^12.10.0",
     "framer-motion": "^12.34.3",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
     "lucide-react": "^0.575.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

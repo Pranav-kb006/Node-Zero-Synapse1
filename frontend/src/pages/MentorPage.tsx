@@ -1,5 +1,6 @@
 import { Sparkles, MessageSquare, Send, Loader2 } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useAskAI } from '../lib/hooks';
 import { markdownToHtml } from '../lib/markdown';
 
@@ -9,14 +10,45 @@ interface Message {
 }
 
 export default function MentorPage() {
+    const [searchParams, setSearchParams] = useSearchParams();
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
     const askAI = useAskAI();
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const hasAutoAsked = useRef(false);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    useEffect(() => {
+        const query = searchParams.get('q') || searchParams.get('query');
+        if (query && !hasAutoAsked.current) {
+            hasAutoAsked.current = true;
+            // Clear parameters from URL
+            setSearchParams({}, { replace: true });
+            
+            // Run helper to send
+            (async () => {
+                setMessages(prev => [...prev, { role: 'user', content: query }]);
+                try {
+                    const result = await askAI.mutateAsync(query);
+                    let answer: string;
+                    if (typeof result === 'string') {
+                        answer = result;
+                    } else if (result && typeof result === 'object' && 'answer' in result) {
+                        answer = (result as { answer: string }).answer;
+                    } else {
+                        answer = JSON.stringify(result);
+                    }
+                    setMessages(prev => [...prev, { role: 'assistant', content: answer }]);
+                } catch (err) {
+                    const message = err instanceof Error ? err.message : 'Failed to get response';
+                    setMessages(prev => [...prev, { role: 'assistant', content: `⚠ Error: ${message}` }]);
+                }
+            })();
+        }
+    }, [searchParams, askAI, setSearchParams]);
 
     const handleSend = async () => {
         const query = input.trim();

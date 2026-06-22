@@ -54,7 +54,7 @@ export async function computeCoarseLayout(
  * Returns nodes positioned around the file node.
  */
 export async function computeEntityLayout(
-  fileNode: ExplorerNode,
+  _fileNode: ExplorerNode,
   entityNodes: ExplorerNode[],
   entityEdges: ExplorerEdge[],
 ): Promise<{ nodes: Node[]; edges: Edge[] }> {
@@ -128,7 +128,6 @@ async function computeLayout(
     layouted = await elk.layout(graph, {
       layoutOptions,
       logging: false,
-      measureNodeHierarchy: true,
     });
   } catch (err) {
     console.warn('ELK layout failed, using grid fallback', err);
@@ -146,8 +145,6 @@ async function computeLayout(
   // Convert to React Flow nodes
   const rfNodes: Node[] = explorerNodes.map((en) => {
     const elkN = elkPosMap.get(en.id);
-    const w = nodeWidth(en.kind);
-    const h = nodeHeight(en.kind);
     const x = elkN?.x ?? 0;
     const y = elkN?.y ?? 0;
     const rawNode = nodeMap.get(en.id);

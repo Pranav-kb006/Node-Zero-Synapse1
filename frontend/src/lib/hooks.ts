@@ -128,6 +128,15 @@ export function useLayers() {
     });
 }
 
+export function useGitDiff() {
+    return useQuery({
+        queryKey: ['git-diff'],
+        queryFn: () => api.getGitDiff(),
+        staleTime: 30_000,
+    });
+}
+
+
 // ─── AI hooks ──────────────────────────────────────────
 
 export function useAskAI() {

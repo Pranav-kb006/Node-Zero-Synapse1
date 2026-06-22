@@ -619,6 +619,49 @@ def get_blast_radius(function_name: str):
     }
 
 
+@app.get("/git/diff")
+def get_git_diff(
+    repo_path: Optional[str] = Query(None, description="Path to repository"),
+):
+    """
+    Returns list of modified and untracked files in the active git repository.
+    """
+    path = _active_repo_path(repo_path)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Repository path not found")
+        
+    try:
+        import git
+        repo = git.Repo(path)
+        if repo.bare:
+            return {"changed_files": []}
+            
+        changed = set()
+        
+        # Diff index against working tree (modified files)
+        for item in repo.index.diff(None):
+            if item.a_path:
+                changed.add(item.a_path)
+            if item.b_path:
+                changed.add(item.b_path)
+                
+        # Diff HEAD against index (staged files)
+        if repo.head.is_valid():
+            for item in repo.index.diff("HEAD"):
+                if item.a_path:
+                    changed.add(item.a_path)
+                if item.b_path:
+                    changed.add(item.b_path)
+                    
+        # Untracked files
+        for ut in repo.untracked_files:
+            changed.add(ut)
+            
+        return {"changed_files": list(changed)}
+    except Exception:
+        return {"changed_files": []}
+
+
 @app.get("/git-risk/{file_path:path}")
 def get_git_risk(file_path: str):
     """

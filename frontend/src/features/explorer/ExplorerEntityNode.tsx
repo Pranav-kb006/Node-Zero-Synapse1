@@ -1,7 +1,9 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import { Zap, Box, GitBranch, Database, Import, HelpCircle } from 'lucide-react';
-import type { ExplorerNode } from '../types';
+import { Zap, Box, GitBranch, Database, Import, HelpCircle, Plus } from 'lucide-react';
+import type { ExplorerNode } from './types';
+
+import type { PersonaFilterConfig } from './personas/PersonaPresets';
 
 function kindIcon(kind: string) {
   switch (kind) {
@@ -28,20 +30,35 @@ function riskColor(level?: string) {
 }
 
 function EntityNodeComponent({ data }: NodeProps) {
-  const node = data as unknown as ExplorerNode;
-  const Icon = kindIcon(node.kind);
-  const rc = riskColor(node.risk?.level);
+  const node = data as unknown as ExplorerNode & { personaConfig?: PersonaFilterConfig };
+  const persona = node.personaConfig;
+  const isPlaceholder = node.metadata?.isPlaceholder === true;
+  const Icon = isPlaceholder ? Plus : kindIcon(node.kind);
+  const rc = isPlaceholder
+    ? { border: 'border-white/10 border-dashed', text: 'text-white/40', glow: '' }
+    : riskColor(node.risk?.level);
   const cx = node.complexity?.cyclomatic;
 
+  // Persona presets
+  const showLabels = persona?.showLabels ?? true;
+  const labelScaleClass = persona?.labelScale === 'large' ? 'text-[12px]' : 'text-[10px]';
+  const showComplexity = persona?.showComplexity ?? true;
+  const nodeScale = persona?.nodeScale ?? 1;
+
   return (
-    <div className={`relative group rounded-md border ${rc.border} bg-synapse-panel/70 backdrop-blur-sm shadow-sm min-w-[140px] transition-all duration-150 hover:shadow-md ${rc.glow}`}>
+    <div 
+      style={{ transform: `scale(${nodeScale})`, transformOrigin: 'center' }}
+      className={`relative group rounded-md border ${rc.border} ${isPlaceholder ? 'bg-white/5' : 'bg-synapse-panel/70'} backdrop-blur-sm shadow-sm min-w-[140px] transition-all duration-150 hover:shadow-md ${rc.glow}`}
+    >
       <Handle type="target" position={Position.Top} className="!bg-white/15 !w-1 !h-1 !border-0" />
       <div className="flex items-center gap-1.5 px-2.5 py-1.5">
-        <Icon className={`w-3 h-3 ${rc.text} flex-shrink-0`} />
-        <div className="flex-1 min-w-0">
-          <p className="text-[10px] font-medium text-white/80 truncate">{node.name}</p>
-        </div>
-        {cx != null && cx > 0 && (
+        <Icon className={`w-3.5 h-3.5 ${rc.text} flex-shrink-0`} />
+        {showLabels && (
+          <div className="flex-1 min-w-0">
+            <p className={`font-medium ${isPlaceholder ? 'text-white/40 italic' : 'text-white/85'} truncate ${labelScaleClass}`}>{node.name}</p>
+          </div>
+        )}
+        {!isPlaceholder && showComplexity && cx != null && cx > 0 && (
           <span className="text-[8px] text-white/30 font-mono">{cx}</span>
         )}
       </div>

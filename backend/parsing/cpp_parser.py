@@ -148,12 +148,22 @@ def _extract_cpp_class(node, file_path: str) -> Tuple[ClassEntity, List[Function
     # Find base classes
     base_classes = []
     base_clause = node.child_by_field_name("base_classes")
-    if base_clause:
-        for child in base_clause.children:
+    if not base_clause:
+        for child in node.children:
             if child.type == "base_class_clause":
-                for sub in child.children:
-                    if sub.type == "type_identifier":
-                        base_classes.append(sub.text.decode("utf8"))
+                base_clause = child
+                break
+    if base_clause:
+        if base_clause.type == "base_class_clause":
+            for sub in base_clause.children:
+                if sub.type == "type_identifier":
+                    base_classes.append(sub.text.decode("utf8"))
+        else:
+            for child in base_clause.children:
+                if child.type == "base_class_clause":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            base_classes.append(sub.text.decode("utf8"))
     
     methods: List[FunctionEntity] = []
     method_names: List[str] = []
@@ -180,6 +190,61 @@ def _extract_cpp_class(node, file_path: str) -> Tuple[ClassEntity, List[Function
     )
     
     return class_entity, methods
+
+
+def _extract_cpp_variables(node, file_path: str, current_namespace: Optional[str] = None) -> List[VariableEntity]:
+    """Extract global/namespace VariableEntity instances from a C++ declaration node."""
+    variables: List[VariableEntity] = []
+    
+    type_node = node.child_by_field_name("type")
+    type_annotation = type_node.text.decode("utf8") if type_node else None
+    
+    if not type_node:
+        return []
+
+    def get_declarator_identifier(n):
+        if not n:
+            return None
+        if n.type == "identifier":
+            return n
+        if n.type == "function_declarator":
+            return None
+        if n.type in ["pointer_declarator", "reference_declarator", "array_declarator", "init_declarator"]:
+            decl = n.child_by_field_name("declarator")
+            if not decl:
+                for child in n.children:
+                    if child.type in ["identifier", "pointer_declarator", "reference_declarator", "array_declarator", "init_declarator"]:
+                        decl = child
+                        break
+            if decl:
+                return get_declarator_identifier(decl)
+        return None
+
+    for child in node.children:
+        if child == type_node:
+            continue
+        if child.type in [";", ",", "=", "type_qualifier", "storage_class_specifier"]:
+            continue
+            
+        ident_node = get_declarator_identifier(child)
+        if ident_node:
+            name = ident_node.text.decode("utf8")
+            is_constant = False
+            node_text = node.text.decode("utf8")
+            if "const " in node_text or "constexpr " in node_text or name.isupper():
+                is_constant = True
+                
+            full_name = f"{current_namespace}::{name}" if current_namespace else name
+            variables.append(VariableEntity(
+                name=full_name,
+                file_path=file_path,
+                line=node.start_point[0] + 1,
+                type_annotation=type_annotation,
+                scope="module",
+                is_constant=is_constant
+            ))
+            
+    return variables
 
 
 def parse_cpp_file(file_path: str) -> ParsedFile:
@@ -250,6 +315,12 @@ def parse_cpp_file(file_path: str) -> ParsedFile:
                 )
                 result.imports.append(imp)
                 result.module.imports.append(inc_path)
+                
+        elif node.type == "declaration":
+            vars_list = _extract_cpp_variables(node, file_path, current_namespace)
+            result.variables.extend(vars_list)
+            for v in vars_list:
+                result.module.global_variables.append(v.name)
                 
         else:
             for child in node.children:

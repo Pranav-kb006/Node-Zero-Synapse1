@@ -1,5 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ExternalLink, Zap, Box, GitBranch, Database, Copy, ChevronRight } from 'lucide-react';
+import { X, Zap, Box, GitBranch, Database, Copy, ChevronRight, Sparkles } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import type { ExplorerNode, ExplorerEdge } from './types';
 
 interface DetailDrawerProps {
@@ -88,6 +89,17 @@ export function DetailDrawer({ node, edges, onClose }: DetailDrawerProps) {
                   cx: {node.complexity.cyclomatic}
                 </span>
               )}
+            </div>
+
+            {/* Ask Mentor */}
+            <div>
+              <Link
+                to={`/mentor?q=${encodeURIComponent(`Explain the entity '${node.name}' (${node.kind}) in '${node.file_path}'.`)}`}
+                className="w-full py-2 px-3 flex items-center justify-center gap-2 rounded-lg bg-neon-indigo/10 border border-neon-indigo/35 hover:bg-neon-indigo/20 text-xs font-semibold text-neon-indigo transition-all"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Ask Mentor to Explain
+              </Link>
             </div>
 
             {/* Qualified name */}
