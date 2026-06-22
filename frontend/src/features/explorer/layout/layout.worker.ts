@@ -1,31 +1,12 @@
 import ELK from 'elkjs/lib/elk.bundled.js';
-// @ts-ignore
-import * as ELKWorkerModule from 'elkjs/lib/elk-worker.min.js';
+// @ts-ignore - raw import gives us the worker source as a string
+import elkWorkerSource from 'elkjs/lib/elk-worker.min.js?raw';
 
-// Unwraps custom worker constructor from any level of ESM/CommonJS module wrapping
-function findWorkerConstructor(obj: any): any {
-  if (typeof obj === 'function') {
-    return obj;
-  }
-  if (obj && typeof obj === 'object') {
-    if (typeof obj.Worker === 'function') return obj.Worker;
-    if (typeof obj.default === 'function') return obj.default;
-    if (obj.default && typeof obj.default === 'object') {
-      return findWorkerConstructor(obj.default);
-    }
-  }
-  return null;
-}
-
-const ELKWorker = findWorkerConstructor(ELKWorkerModule) || findWorkerConstructor(ELK);
+const blob = new Blob([elkWorkerSource], { type: 'application/javascript' });
+const elkWorkerUrl = URL.createObjectURL(blob);
 
 const elk = new ELK({
-  workerFactory: () => {
-    if (!ELKWorker) {
-      throw new Error('Could not resolve ELKWorker constructor');
-    }
-    return new ELKWorker();
-  }
+  workerUrl: elkWorkerUrl,
 });
 
 self.onmessage = async function (e: MessageEvent) {
